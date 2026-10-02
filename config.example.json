@@ -1,0 +1,16 @@
+{
+  "run_address": "localhost:8080",
+  "database_dsn": "postgres://gophkeeper:gophkeeper@localhost:5432/gophkeeper?sslmode=disable",
+  "jwt_secret": "",
+  "token_ttl": "24h",
+  "log_level": "info",
+  "enable_https": false,
+  "tls_cert_file": "",
+  "tls_key_file": "",
+  "read_timeout": "10s",
+  "write_timeout": "10s",
+  "idle_timeout": "60s",
+  "shutdown_timeout": "15s",
+  "bcrypt_cost": 12,
+  "migrations_dir": "internal/repository/migrations"
+}

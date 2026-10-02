@@ -1,0 +1,23 @@
+# PostgreSQL для локальной разработки GophKeeper.
+# Запуск: docker compose up -d
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: gophkeeper-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: gophkeeper
+      POSTGRES_PASSWORD: gophkeeper
+      POSTGRES_DB: gophkeeper
+    ports:
+      - "5432:5432"
+    volumes:
+      - gophkeeper-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gophkeeper -d gophkeeper"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  gophkeeper-pgdata:

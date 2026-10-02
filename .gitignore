@@ -1,0 +1,38 @@
+# Бинарники и артефакты сборки
+/bin/
+/dist/
+/tmp/
+gophkeeper-server
+gophkeeper-server.exe
+gophkeeper-client
+gophkeeper-client.exe
+gophkeeper
+gophkeeper.exe
+
+# Переменные окружения и секреты
+.env
+.env.*
+!.env.example
+
+# Сертификаты и ключи
+*.pem
+*.crt
+*.cer
+*.key
+/certs/
+
+# Локальные данные и БД
+/data/
+*.db
+*.sqlite
+*.sqlite3
+
+# Покрытие и отчёты
+coverage.out
+coverage.html
+coverage.txt
+*.coverprofile
+
+# Артефакты IDE и логи
+.idea/
+*.log

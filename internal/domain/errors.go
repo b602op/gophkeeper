@@ -19,8 +19,16 @@ var (
 	ErrInvalidToken = errors.New("недействительный токен")
 	// ErrSecretNotFound возвращается, когда секрет не найден или недоступен.
 	ErrSecretNotFound = errors.New("секрет не найден")
+	// ErrSecretAlreadyExists возвращается при попытке создать существующий секрет.
+	ErrSecretAlreadyExists = errors.New("секрет уже существует")
+	// ErrSecretVersionMismatch возвращается при несовпадении версии секрета.
+	ErrSecretVersionMismatch = errors.New("конфликт версий секрета")
 	// ErrInvalidSecretType возвращается при неизвестном типе секрета.
 	ErrInvalidSecretType = errors.New("неизвестный тип секрета")
+	// ErrInvalidSecretData возвращается при некорректных данных секрета.
+	ErrInvalidSecretData = errors.New("некорректные данные секрета")
+	// ErrForbidden возвращается при попытке доступа к чужому ресурсу.
+	ErrForbidden = errors.New("доступ запрещён")
 	// ErrValidation возвращается, когда входные данные не прошли проверку.
 	ErrValidation = errors.New("ошибка валидации")
 )

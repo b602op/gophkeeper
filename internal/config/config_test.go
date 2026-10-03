@@ -111,9 +111,9 @@ func TestLoadPriority(t *testing.T) {
 
 	t.Run("флаги перекрывают env", func(t *testing.T) {
 		env := envMap(map[string]string{
-			envRunAddress: "127.0.0.1:7000",
-			envLogLevel:   "error",
-			envJWTSecret:  testSecret,
+			envRunAddress:  "127.0.0.1:7000",
+			envLogLevel:    "error",
+			envJWTSecret:   testSecret,
 			envDatabaseDSN: testDSN,
 		})
 		cfg, err := load([]string{

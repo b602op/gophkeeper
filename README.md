@@ -76,16 +76,59 @@ handlers (HTTP/gRPC/CLI) -> service -> repository -> domain
 
 ## API
 
+Все защищённые маршруты требуют заголовок `Authorization: Bearer <JWT>`.
+Ошибки возвращаются в едином формате `{"error": "..."}`.
+
 | Метод | Путь | Описание |
 | --- | --- | --- |
 | `POST` | `/api/v1/register` | регистрация пользователя |
 | `POST` | `/api/v1/login` | аутентификация, выдача JWT |
-| `GET` | `/api/v1/secrets` | список секретов |
+| `GET` | `/api/v1/secrets` | список неудалённых секретов |
 | `GET` | `/api/v1/secrets/{id}` | получить секрет |
 | `POST` | `/api/v1/secrets` | создать секрет |
 | `PUT` | `/api/v1/secrets/{id}` | обновить секрет |
 | `DELETE` | `/api/v1/secrets/{id}` | удалить секрет (soft delete) |
 | `GET` | `/api/v1/sync?since=...` | синхронизация изменений |
+
+### Секреты
+
+Тело запроса создания и обновления:
+
+```json
+{
+  "type": "credentials",
+  "name": "Почта",
+  "metadata": "личное",
+  "data": "<base64 от шифротекста>",
+  "version": 1
+}
+```
+
+- `type` — `credentials`, `text`, `binary` или `card`.
+- `data` — зашифрованные на клиенте данные (сервер видит только шифротекст).
+- `metadata` — произвольная текстовая метаинформация (до 64 КиБ).
+- `data` — до 1 МиБ, `name` — до 255 символов.
+
+Обновление использует оптимистичную блокировку по `version`: если запись уже
+изменена другим клиентом, сервер отвечает `409 Conflict` с ошибкой
+`ErrSecretVersionMismatch`.
+
+### Синхронизация
+
+`GET /api/v1/sync?since=<RFC3339>` возвращает все записи, изменённые строго
+после указанного момента, **включая удалённые** (`deleted_at != nil`) — так
+клиенты узнают об удалениях. Без параметра `since` возвращаются все неудалённые
+секреты. Пример: `?since=2026-01-15T10:30:00Z`.
+
+### Коды ошибок
+
+| Ошибка | HTTP |
+| --- | --- |
+| `ErrValidation`, `ErrInvalidSecretType`, `ErrInvalidSecretData` | 400 |
+| `ErrInvalidCredentials`, `ErrInvalidToken` | 401 |
+| `ErrForbidden` | 403 |
+| `ErrUserAlreadyExists`, `ErrSecretAlreadyExists`, `ErrSecretVersionMismatch` | 409 |
+| `ErrUserNotFound`, `ErrSecretNotFound` | 404 |
 
 ## CLI
 

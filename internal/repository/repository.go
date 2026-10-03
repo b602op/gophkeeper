@@ -21,5 +21,15 @@ type DBTX interface {
 	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
 }
 
+// DBTXWithTx расширяет DBTX возможностью начинать транзакции.
+//
+// Интерфейс реализуют *sql.DB и *sql.Tx, что позволяет репозиториям выполнять
+// атомарные операции с оптимистичной блокировкой.
+type DBTXWithTx interface {
+	DBTX
+	// BeginTx начинает транзакцию.
+	BeginTx(ctx context.Context, opts *sql.TxOptions) (*sql.Tx, error)
+}
+
 // pgUniqueViolation — код ошибки PostgreSQL при нарушении уникальности.
 const pgUniqueViolation = "23505"

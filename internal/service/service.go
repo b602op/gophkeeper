@@ -7,6 +7,7 @@ package service
 
 import (
 	"context"
+	"time"
 
 	"github.com/b602op/gophkeeper/internal/domain"
 )
@@ -22,4 +23,20 @@ type UserRepository interface {
 	GetByLogin(ctx context.Context, login string) (*domain.User, error)
 	// GetByID возвращает пользователя по идентификатору.
 	GetByID(ctx context.Context, id string) (*domain.User, error)
+}
+
+// SecretRepository описывает доступ к секретам, необходимый сервисам.
+type SecretRepository interface {
+	// Create сохраняет новый секрет.
+	Create(ctx context.Context, secret *domain.Secret) error
+	// FindByID возвращает неудалённый секрет по идентификатору.
+	FindByID(ctx context.Context, id string) (*domain.Secret, error)
+	// FindByUser возвращает неудалённые секреты пользователя.
+	FindByUser(ctx context.Context, userID string) ([]*domain.Secret, error)
+	// FindByUserSince возвращает секреты, изменённые после since, включая удалённые.
+	FindByUserSince(ctx context.Context, userID string, since time.Time) ([]*domain.Secret, error)
+	// Update обновляет секрет с проверкой версии.
+	Update(ctx context.Context, secret *domain.Secret) error
+	// SoftDelete помечает секрет удалённым.
+	SoftDelete(ctx context.Context, id, userID string) error
 }

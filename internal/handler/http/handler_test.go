@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -44,19 +45,87 @@ func (s *stubAuth) ParseToken(token string) (string, error) {
 	return s.parseTokenFn(token)
 }
 
+// stubSecrets — управляемый мок SecretService.
+type stubSecrets struct {
+	createFn func(ctx context.Context, userID string, secret *domain.Secret) error
+	getFn    func(ctx context.Context, userID, id string) (*domain.Secret, error)
+	listFn   func(ctx context.Context, userID string) ([]*domain.Secret, error)
+	updateFn func(ctx context.Context, userID string, secret *domain.Secret) error
+	deleteFn func(ctx context.Context, userID, id string) error
+	syncFn   func(ctx context.Context, userID string, since time.Time) ([]*domain.Secret, error)
+}
+
+func (s *stubSecrets) Create(ctx context.Context, userID string, secret *domain.Secret) error {
+	if s.createFn == nil {
+		return nil
+	}
+	return s.createFn(ctx, userID, secret)
+}
+
+func (s *stubSecrets) Get(ctx context.Context, userID, id string) (*domain.Secret, error) {
+	if s.getFn == nil {
+		return nil, domain.ErrSecretNotFound
+	}
+	return s.getFn(ctx, userID, id)
+}
+
+func (s *stubSecrets) List(ctx context.Context, userID string) ([]*domain.Secret, error) {
+	if s.listFn == nil {
+		return []*domain.Secret{}, nil
+	}
+	return s.listFn(ctx, userID)
+}
+
+func (s *stubSecrets) Update(ctx context.Context, userID string, secret *domain.Secret) error {
+	if s.updateFn == nil {
+		return nil
+	}
+	return s.updateFn(ctx, userID, secret)
+}
+
+func (s *stubSecrets) Delete(ctx context.Context, userID, id string) error {
+	if s.deleteFn == nil {
+		return nil
+	}
+	return s.deleteFn(ctx, userID, id)
+}
+
+func (s *stubSecrets) Sync(ctx context.Context, userID string, since time.Time) ([]*domain.Secret, error) {
+	if s.syncFn == nil {
+		return []*domain.Secret{}, nil
+	}
+	return s.syncFn(ctx, userID, since)
+}
+
 // newTestHandler создаёт хендлер с логгером в никуда.
 func newTestHandler(auth AuthService) *Handler {
-	return New(auth, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	return New(auth, &stubSecrets{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+}
+
+// newSecretHandler создаёт хендлер с заданным моком секретов.
+// Токен авторизации считается принадлежащим пользователю user-1.
+func newSecretHandler(secrets SecretService) *Handler {
+	auth := &stubAuth{parseTokenFn: func(string) (string, error) { return "user-1", nil }}
+	return New(auth, secrets, slog.New(slog.NewTextHandler(io.Discard, nil)))
 }
 
 // doRequest выполняет запрос к роутеру и возвращает ответ.
 func doRequest(t *testing.T, h http.Handler, method, target, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	return doRequestWithAuth(t, h, method, target, body, true)
+}
+
+// doRequestWithAuth выполняет запрос; при authorized=true добавляет Bearer-токен.
+func doRequestWithAuth(t *testing.T, h http.Handler, method, target, body string, authorized bool) *httptest.ResponseRecorder {
 	t.Helper()
 	var reader io.Reader
 	if body != "" {
 		reader = strings.NewReader(body)
 	}
 	req := httptest.NewRequest(method, target, reader)
+	if authorized {
+		req.Header.Set("Authorization", "Bearer valid-token")
+	}
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	return rec

@@ -1,9 +1,11 @@
 package httpapi
 
 import (
+	"errors"
+	"log/slog"
 	"net/http"
 
-	"log/slog"
+	"github.com/b602op/gophkeeper/internal/domain"
 )
 
 // credentialsRequest — тело запроса регистрации и входа.
@@ -73,21 +75,27 @@ func (h *Handler) respondServiceError(w http.ResponseWriter, operation string, e
 		slog.Int("status", status),
 		slog.Any("error", err),
 	)
-	writeError(h.log, w, status, publicMessage(status))
+	writeError(h.log, w, status, publicMessage(err, status))
 }
 
-// publicMessage возвращает безопасное для клиента сообщение по HTTP-статусу.
+// publicMessage возвращает безопасное для клиента сообщение по ошибке и
+// HTTP-статусу.
 //
 // Наружу не выносится текст внутренней ошибки: он может содержать детали
 // хранилища или конфигурации.
-func publicMessage(status int) string {
+func publicMessage(err error, status int) string {
 	switch status {
 	case http.StatusBadRequest:
 		return "некорректные данные запроса"
 	case http.StatusUnauthorized:
 		return "неверный логин или пароль"
+	case http.StatusForbidden:
+		return "доступ запрещён"
 	case http.StatusConflict:
-		return "пользователь уже существует"
+		if errors.Is(err, domain.ErrSecretVersionMismatch) {
+			return "конфликт версий: запись изменена другим клиентом"
+		}
+		return "ресурс уже существует"
 	case http.StatusNotFound:
 		return "ресурс не найден"
 	default:

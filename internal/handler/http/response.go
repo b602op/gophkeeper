@@ -50,18 +50,22 @@ func writeError(log *slog.Logger, w http.ResponseWriter, status int, message str
 // одинаковые ошибки одинаково.
 func statusForError(err error) int {
 	switch {
-	case errors.Is(err, domain.ErrValidation):
+	case errors.Is(err, domain.ErrValidation),
+		errors.Is(err, domain.ErrInvalidSecretType),
+		errors.Is(err, domain.ErrInvalidSecretData):
 		return http.StatusBadRequest
-	case errors.Is(err, domain.ErrInvalidCredentials):
+	case errors.Is(err, domain.ErrInvalidCredentials),
+		errors.Is(err, domain.ErrInvalidToken):
 		return http.StatusUnauthorized
-	case errors.Is(err, domain.ErrInvalidToken):
-		return http.StatusUnauthorized
-	case errors.Is(err, domain.ErrUserAlreadyExists):
+	case errors.Is(err, domain.ErrForbidden):
+		return http.StatusForbidden
+	case errors.Is(err, domain.ErrUserAlreadyExists),
+		errors.Is(err, domain.ErrSecretAlreadyExists),
+		errors.Is(err, domain.ErrSecretVersionMismatch):
 		return http.StatusConflict
-	case errors.Is(err, domain.ErrUserNotFound), errors.Is(err, domain.ErrSecretNotFound):
+	case errors.Is(err, domain.ErrUserNotFound),
+		errors.Is(err, domain.ErrSecretNotFound):
 		return http.StatusNotFound
-	case errors.Is(err, domain.ErrInvalidSecretType):
-		return http.StatusBadRequest
 	default:
 		return http.StatusInternalServerError
 	}

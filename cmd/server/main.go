@@ -15,6 +15,7 @@ import (
 	"github.com/b602op/gophkeeper/internal/buildinfo"
 	"github.com/b602op/gophkeeper/internal/config"
 	httpapi "github.com/b602op/gophkeeper/internal/handler/http"
+	"github.com/b602op/gophkeeper/internal/idgen"
 	"github.com/b602op/gophkeeper/internal/logger"
 	"github.com/b602op/gophkeeper/internal/middleware"
 	"github.com/b602op/gophkeeper/internal/repository"
@@ -62,8 +63,12 @@ func run() error {
 		cfg.TokenTTL,
 		cfg.BcryptCost,
 	)
+	secretService := service.NewSecretService(
+		repository.NewSecretRepository(pool.DB()),
+		idgen.NewUUIDGenerator(),
+	)
 
-	handler := httpapi.New(authService, log)
+	handler := httpapi.New(authService, secretService, log)
 	router := middleware.Chain(
 		handler.Routes(),
 		middleware.Recovery(log),

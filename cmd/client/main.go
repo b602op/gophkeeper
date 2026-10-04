@@ -1,15 +1,16 @@
 // Command client — CLI-клиент GophKeeper.
 //
-// На текущем этапе реализована только команда version; полноценные команды
-// работы с секретами добавляются на следующем этапе.
+// Все команды реализованы в пакете internal/cli на базе cobra: регистрация и
+// вход, работа с секретами (add/get/list/search/update/delete), синхронизация и
+// вывод версии. Точка входа лишь собирает корневую команду и обрабатывает
+// ошибку.
 package main
 
 import (
-	"fmt"
 	"log"
 	"os"
 
-	"github.com/b602op/gophkeeper/internal/buildinfo"
+	"github.com/b602op/gophkeeper/internal/cli"
 )
 
 func main() {
@@ -20,29 +21,7 @@ func main() {
 
 // run выполняет команду CLI и возвращает ошибку вместо прямого выхода.
 func run(args []string) error {
-	if len(args) == 0 {
-		printUsage()
-		return nil
-	}
-
-	switch args[0] {
-	case "version":
-		fmt.Println(buildinfo.String())
-	case "help", "-h", "--help":
-		printUsage()
-	default:
-		return fmt.Errorf("неизвестная команда %q", args[0])
-	}
-	return nil
-}
-
-// printUsage печатает краткую справку по командам клиента.
-func printUsage() {
-	fmt.Println("GophKeeper — менеджер паролей")
-	fmt.Println()
-	fmt.Println("Использование: gophkeeper <команда>")
-	fmt.Println()
-	fmt.Println("Команды:")
-	fmt.Println("  version   показать версию и дату сборки")
-	fmt.Println("  help      показать эту справку")
+	root := cli.NewRootCommand()
+	root.SetArgs(args)
+	return root.Execute()
 }

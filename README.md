@@ -132,18 +132,49 @@ handlers (HTTP/gRPC/CLI) -> service -> repository -> domain
 
 ## CLI
 
+Клиент шифрует данные мастер-паролем (Argon2id + AES-256-GCM) до отправки на
+сервер; мастер-пароль и ключ никогда не покидают устройство.
+
 ```bash
-gophkeeper register          # регистрация
-gophkeeper login             # аутентификация
-gophkeeper add credentials   # добавить логин/пароль
-gophkeeper add card          # добавить карту
-gophkeeper add text          # добавить текст
-gophkeeper add binary        # добавить бинарные данные
-gophkeeper get <id>          # получить секрет
-gophkeeper list              # список всех записей
-gophkeeper sync              # синхронизация
-gophkeeper version           # версия и дата сборки
+gophkeeper register --login <login>          # регистрация
+gophkeeper login --login <login>             # вход + ввод мастер-пароля
+gophkeeper logout                            # выход (очистка токена и ключа)
+
+gophkeeper add <name> --type credentials --username u --password p
+gophkeeper add <name> --type card --card-number ... --card-holder ...
+gophkeeper add <name> --type text --text "..."
+gophkeeper add <name> --type binary --file ./data.bin
+
+gophkeeper get <id>                          # получить и расшифровать
+gophkeeper list                              # список записей
+gophkeeper search <query>                    # поиск по названию и метаданным
+gophkeeper update <id> [флаги данных]        # обновить запись
+gophkeeper delete <id>                       # удалить запись
+gophkeeper sync                              # синхронизация с сервером
+gophkeeper version                           # версия и дата сборки
 ```
+
+Команда `add` универсальна: тип задаётся флагом `--type`. Если данные не заданы
+флагами, клиент запросит их интерактивно (пароли вводятся без эха).
+
+### Конфигурация клиента
+
+- Конфиг: `~/.config/gophkeeper/config.json` (Linux/macOS),
+  `%APPDATA%\gophkeeper\config.json` (Windows).
+- Токен: `~/.local/share/gophkeeper/token` (Linux/macOS),
+  `%LOCALAPPDATA%\gophkeeper	oken` (Windows), права `600`.
+- Локальная база: `~/.local/share/gophkeeper/<user_id>/secrets.db`, права `600`.
+
+Адрес сервера задаётся полем `server_address` (по умолчанию
+`http://localhost:8080`).
+
+### Разрешение конфликтов
+
+При синхронизации и обновлении используется оптимистичная блокировка по
+`version`. Если запись изменена другим клиентом, сервер отвечает `409`, и
+пользователю предлагается выбор: `[l]ocal` — оставить локальную версию,
+`[r]emote` — принять серверную, `[s]kip` — пропустить.
+
 
 ## Разработка
 

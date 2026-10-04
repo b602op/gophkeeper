@@ -56,6 +56,14 @@ func secretRow(s *domain.Secret) *sqlmock.Rows {
 		s.Version, s.CreatedAt, s.UpdatedAt, deletedAt)
 }
 
+// updatedSecretRow возвращает строку результата UPDATE ... RETURNING
+// (без deleted_at — он в RETURNING не возвращается).
+func updatedSecretRow(s *domain.Secret, version int64, updatedAt time.Time) *sqlmock.Rows {
+	return sqlmock.NewRows([]string{
+		"id", "user_id", "type", "name", "metadata", "data", "version", "created_at", "updated_at",
+	}).AddRow(s.ID, s.UserID, s.Type, s.Name, s.Metadata, s.Data, version, s.CreatedAt, updatedAt)
+}
+
 func TestSecretRepositoryCreate(t *testing.T) {
 	t.Run("успех", func(t *testing.T) {
 		repo, mock := newSecretRepo(t)
@@ -98,10 +106,10 @@ func TestSecretRepositoryFindByID(t *testing.T) {
 		repo, mock := newSecretRepo(t)
 		s := testSecret()
 		mock.ExpectQuery(regexp.QuoteMeta(querySelectSecretByID)).
-			WithArgs(s.ID).
+			WithArgs(s.ID, s.UserID).
 			WillReturnRows(secretRow(s))
 
-		got, err := repo.FindByID(context.Background(), s.ID)
+		got, err := repo.FindByID(context.Background(), s.UserID, s.ID)
 		require.NoError(t, err)
 		require.Equal(t, s, got)
 		require.Nil(t, got.DeletedAt)
@@ -110,10 +118,23 @@ func TestSecretRepositoryFindByID(t *testing.T) {
 	t.Run("удалённый секрет не возвращается", func(t *testing.T) {
 		repo, mock := newSecretRepo(t)
 		mock.ExpectQuery(regexp.QuoteMeta(querySelectSecretByID)).
-			WithArgs("deleted").
+			WithArgs("deleted", "user-1").
 			WillReturnError(sql.ErrNoRows)
 
-		got, err := repo.FindByID(context.Background(), "deleted")
+		got, err := repo.FindByID(context.Background(), "user-1", "deleted")
+		require.ErrorIs(t, err, domain.ErrSecretNotFound)
+		require.Nil(t, got)
+	})
+
+	t.Run("чужой секрет неотличим от несуществующего", func(t *testing.T) {
+		// Запрос фильтрует по user_id, поэтому для чужого пользователя
+		// sql.ErrNoRows маппится в domain.ErrSecretNotFound (HTTP 404).
+		repo, mock := newSecretRepo(t)
+		mock.ExpectQuery(regexp.QuoteMeta(querySelectSecretByID)).
+			WithArgs("secret-1", "intruder").
+			WillReturnError(sql.ErrNoRows)
+
+		got, err := repo.FindByID(context.Background(), "intruder", "secret-1")
 		require.ErrorIs(t, err, domain.ErrSecretNotFound)
 		require.Nil(t, got)
 	})
@@ -122,10 +143,10 @@ func TestSecretRepositoryFindByID(t *testing.T) {
 		repo, mock := newSecretRepo(t)
 		dbErr := errors.New("таймаут")
 		mock.ExpectQuery(regexp.QuoteMeta(querySelectSecretByID)).
-			WithArgs("x").
+			WithArgs("x", "user-1").
 			WillReturnError(dbErr)
 
-		_, err := repo.FindByID(context.Background(), "x")
+		_, err := repo.FindByID(context.Background(), "user-1", "x")
 		require.ErrorIs(t, err, dbErr)
 	})
 }
@@ -225,16 +246,19 @@ func TestSecretRepositoryUpdate(t *testing.T) {
 	t.Run("успех", func(t *testing.T) {
 		repo, mock := newSecretRepo(t)
 		s := testSecret()
+		updatedAt := time.Now().UTC()
 		mock.ExpectBegin()
 		mock.ExpectQuery(regexp.QuoteMeta(querySelectSecretVersion)).
 			WithArgs(s.ID, s.UserID).
 			WillReturnRows(sqlmock.NewRows([]string{"version"}).AddRow(int64(1)))
-		mock.ExpectExec(regexp.QuoteMeta(queryUpdateSecret)).
+		mock.ExpectQuery(regexp.QuoteMeta(queryUpdateSecret)).
 			WithArgs(s.Type, s.Name, s.Metadata, s.Data, s.ID, s.UserID).
-			WillReturnResult(sqlmock.NewResult(0, 1))
+			WillReturnRows(updatedSecretRow(s, 2, updatedAt))
 		mock.ExpectCommit()
 
 		require.NoError(t, repo.Update(context.Background(), s))
+		require.Equal(t, int64(2), s.Version)
+		require.WithinDuration(t, updatedAt, s.UpdatedAt, time.Second)
 		require.NoError(t, mock.ExpectationsWereMet())
 	})
 
@@ -282,7 +306,7 @@ func TestSecretRepositoryUpdate(t *testing.T) {
 		mock.ExpectQuery(regexp.QuoteMeta(querySelectSecretVersion)).
 			WithArgs(s.ID, s.UserID).
 			WillReturnRows(sqlmock.NewRows([]string{"version"}).AddRow(int64(1)))
-		mock.ExpectExec(regexp.QuoteMeta(queryUpdateSecret)).
+		mock.ExpectQuery(regexp.QuoteMeta(queryUpdateSecret)).
 			WithArgs(s.Type, s.Name, s.Metadata, s.Data, s.ID, s.UserID).
 			WillReturnError(dbErr)
 		mock.ExpectRollback()
@@ -299,9 +323,9 @@ func TestSecretRepositoryUpdate(t *testing.T) {
 		mock.ExpectQuery(regexp.QuoteMeta(querySelectSecretVersion)).
 			WithArgs(s.ID, s.UserID).
 			WillReturnRows(sqlmock.NewRows([]string{"version"}).AddRow(int64(1)))
-		mock.ExpectExec(regexp.QuoteMeta(queryUpdateSecret)).
+		mock.ExpectQuery(regexp.QuoteMeta(queryUpdateSecret)).
 			WithArgs(s.Type, s.Name, s.Metadata, s.Data, s.ID, s.UserID).
-			WillReturnResult(sqlmock.NewResult(0, 1))
+			WillReturnRows(updatedSecretRow(s, 2, time.Now()))
 		mock.ExpectCommit().WillReturnError(dbErr)
 
 		err := repo.Update(context.Background(), s)

@@ -63,15 +63,13 @@ func (s *SecretService) Create(ctx context.Context, userID string, secret *domai
 
 // Get возвращает секрет, если он принадлежит пользователю.
 //
-// Отсутствующий секрет и секрет чужого пользователя различимы: первый даёт
-// domain.ErrSecretNotFound, второй — domain.ErrForbidden.
+// Чужой секрет неотличим от несуществующего: условие по user_id в запросе
+// приводит к domain.ErrSecretNotFound (HTTP 404). Это скрывает факт
+// существования чужой записи и защищает от перебора идентификаторов.
 func (s *SecretService) Get(ctx context.Context, userID, id string) (*domain.Secret, error) {
-	secret, err := s.repo.FindByID(ctx, id)
+	secret, err := s.repo.FindByID(ctx, userID, id)
 	if err != nil {
 		return nil, fmt.Errorf("получение секрета %q: %w", id, err)
-	}
-	if secret.UserID != userID {
-		return nil, fmt.Errorf("получение секрета %q: %w", id, domain.ErrForbidden)
 	}
 	return secret, nil
 }
@@ -87,19 +85,12 @@ func (s *SecretService) List(ctx context.Context, userID string) ([]*domain.Secr
 
 // Update обновляет секрет с проверкой владельца и версии.
 //
-// Версия берётся из переданного секрета: несовпадение с хранилищем приводит к
-// domain.ErrSecretVersionMismatch, что защищает от потери параллельных правок.
+// Владение проверяется условием user_id в репозитории: чужой или
+// несуществующий секрет даёт domain.ErrSecretNotFound (HTTP 404), а
+// несовпадение версии — domain.ErrSecretVersionMismatch (HTTP 409).
 func (s *SecretService) Update(ctx context.Context, userID string, secret *domain.Secret) error {
 	if err := validateSecret(secret); err != nil {
 		return err
-	}
-
-	existing, err := s.repo.FindByID(ctx, secret.ID)
-	if err != nil {
-		return fmt.Errorf("обновление секрета %q: %w", secret.ID, err)
-	}
-	if existing.UserID != userID {
-		return fmt.Errorf("обновление секрета %q: %w", secret.ID, domain.ErrForbidden)
 	}
 
 	secret.UserID = userID
@@ -110,16 +101,11 @@ func (s *SecretService) Update(ctx context.Context, userID string, secret *domai
 	return nil
 }
 
-// Delete помечает секрет удалённым, предварительно проверив владельца.
+// Delete помечает секрет удалённым.
+//
+// Владение проверяется условием user_id в репозитории: чужой или
+// несуществующий секрет даёт domain.ErrSecretNotFound (HTTP 404).
 func (s *SecretService) Delete(ctx context.Context, userID, id string) error {
-	existing, err := s.repo.FindByID(ctx, id)
-	if err != nil {
-		return fmt.Errorf("удаление секрета %q: %w", id, err)
-	}
-	if existing.UserID != userID {
-		return fmt.Errorf("удаление секрета %q: %w", id, domain.ErrForbidden)
-	}
-
 	if err := s.repo.SoftDelete(ctx, id, userID); err != nil {
 		return fmt.Errorf("удаление секрета %q: %w", id, err)
 	}

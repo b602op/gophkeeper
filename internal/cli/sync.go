@@ -75,7 +75,7 @@ func (a *app) runSync(ctx context.Context) error {
 		return err
 	}
 
-	a.print("Синхронизация завершена: получено %d записей.\n", len(remote))
+	a.print("Синхронизация завершена: получено записей — %d.\n", len(remote))
 	return nil
 }
 

@@ -29,8 +29,11 @@ type UserRepository interface {
 type SecretRepository interface {
 	// Create сохраняет новый секрет.
 	Create(ctx context.Context, secret *domain.Secret) error
-	// FindByID возвращает неудалённый секрет по идентификатору.
-	FindByID(ctx context.Context, id string) (*domain.Secret, error)
+	// FindByID возвращает неудалённый секрет пользователя по идентификатору.
+	//
+	// Чужой секрет неотличим от несуществующего: возвращается
+	// domain.ErrSecretNotFound.
+	FindByID(ctx context.Context, userID, id string) (*domain.Secret, error)
 	// FindByUser возвращает неудалённые секреты пользователя.
 	FindByUser(ctx context.Context, userID string) ([]*domain.Secret, error)
 	// FindByUserSince возвращает секреты, изменённые после since, включая удалённые.

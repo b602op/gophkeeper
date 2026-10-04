@@ -1,5 +1,6 @@
 # PostgreSQL для локальной разработки GophKeeper.
 # Запуск: docker compose up -d
+# Порт публикации можно изменить, если 5432 занят: GOPHKEEPER_PG_PORT=5433 docker compose up -d
 services:
   postgres:
     image: postgres:16-alpine
@@ -10,7 +11,7 @@ services:
       POSTGRES_PASSWORD: gophkeeper
       POSTGRES_DB: gophkeeper
     ports:
-      - "5432:5432"
+      - "${GOPHKEEPER_PG_PORT:-5432}:5432"
     volumes:
       - gophkeeper-pgdata:/var/lib/postgresql/data
     healthcheck:

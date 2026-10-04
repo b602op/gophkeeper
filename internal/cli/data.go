@@ -35,8 +35,8 @@ func (d *secretData) register(cmd *cobra.Command, defaultType string) {
 	cmd.Flags().StringVar(&d.password, "password", "", "пароль (для credentials)")
 	cmd.Flags().StringVar(&d.cardNumber, "card-number", "", "номер карты (для card)")
 	cmd.Flags().StringVar(&d.cardHolder, "card-holder", "", "держатель карты (для card)")
-	cmd.Flags().StringVar(&d.cardExpiry, "card-expiry", "", "срок действия карты (для card)")
-	cmd.Flags().StringVar(&d.cardCVV, "card-cvv", "", "CVV карты (для card)")
+	cmd.Flags().StringVar(&d.cardExpiry, "expiry", "", "срок действия карты (для card)")
+	cmd.Flags().StringVar(&d.cardCVV, "cvv", "", "CVV карты (для card)")
 	cmd.Flags().StringVar(&d.text, "text", "", "текст (для text)")
 	cmd.Flags().StringVar(&d.file, "file", "", "файл с бинарными данными (для binary)")
 }
@@ -84,6 +84,78 @@ func (a *app) buildPayload(d *secretData) (domain.SecretType, []byte, error) {
 	}
 }
 
+// buildUpdatePayload собирает новые данные для обновления, накладывая заданные
+// флаги на уже существующие расшифрованные данные.
+//
+// Частичное обновление (например, только пароль) не должно затирать остальные
+// поля, поэтому недостающие значения берутся из существующей записи. Если тип
+// меняется, данные собираются заново.
+func (a *app) buildUpdatePayload(d *secretData, secretType domain.SecretType, existing []byte) ([]byte, error) {
+	switch secretType {
+	case domain.SecretTypeCredentials:
+		var payload credentialsPayload
+		if err := decodeExisting(existing, &payload); err != nil {
+			return nil, err
+		}
+		if d.username != "" {
+			payload.Username = d.username
+		}
+		if d.password != "" {
+			payload.Password = d.password
+		}
+		return json.Marshal(payload)
+	case domain.SecretTypeCard:
+		var payload cardPayload
+		if err := decodeExisting(existing, &payload); err != nil {
+			return nil, err
+		}
+		if d.cardNumber != "" {
+			payload.Number = d.cardNumber
+		}
+		if d.cardHolder != "" {
+			payload.Holder = d.cardHolder
+		}
+		if d.cardExpiry != "" {
+			payload.Expiry = d.cardExpiry
+		}
+		if d.cardCVV != "" {
+			payload.CVV = d.cardCVV
+		}
+		return json.Marshal(payload)
+	case domain.SecretTypeText:
+		var payload textPayload
+		if err := decodeExisting(existing, &payload); err != nil {
+			return nil, err
+		}
+		if d.text != "" {
+			payload.Text = d.text
+		}
+		return json.Marshal(payload)
+	case domain.SecretTypeBinary:
+		if d.file != "" {
+			return a.buildBinary(d)
+		}
+		if len(existing) > 0 {
+			return existing, nil
+		}
+		return nil, errors.New("для binary укажите новый файл через --file")
+	default:
+		return nil, fmt.Errorf("%w: %q", domain.ErrInvalidSecretType, secretType)
+	}
+}
+
+// decodeExisting разбирает прежние данные секрета. Пустой ввод считается
+// отсутствием данных, а не ошибкой.
+func decodeExisting(data []byte, dst any) error {
+	if len(data) == 0 {
+		return nil
+	}
+	if err := json.Unmarshal(data, dst); err != nil {
+		return fmt.Errorf("разбор существующих данных: %w", err)
+	}
+	return nil
+}
+
 func (a *app) buildCredentials(d *secretData) ([]byte, error) {
 	username, password := d.username, d.password
 	var err error
@@ -104,6 +176,11 @@ func (a *app) buildCredentials(d *secretData) ([]byte, error) {
 	return json.Marshal(credentialsPayload{Username: username, Password: password})
 }
 
+// buildCard собирает данные карты.
+//
+// Если номер задан флагом, остальные поля не опрашиваются: они необязательны и
+// могут остаться пустыми. Интерактивный опрос выполняется только при полностью
+// пустом вводе.
 func (a *app) buildCard(d *secretData) ([]byte, error) {
 	card := cardPayload{
 		Number: d.cardNumber,
@@ -111,28 +188,29 @@ func (a *app) buildCard(d *secretData) ([]byte, error) {
 		Expiry: d.cardExpiry,
 		CVV:    d.cardCVV,
 	}
-	var err error
 
 	if card.Number == "" {
+		var err error
 		if card.Number, err = a.readLine("Номер карты: "); err != nil {
 			return nil, err
 		}
-	}
-	if card.Holder == "" {
-		if card.Holder, err = a.readLine("Держатель: "); err != nil {
-			return nil, err
+		if card.Holder == "" {
+			if card.Holder, err = a.readLine("Держатель: "); err != nil {
+				return nil, err
+			}
+		}
+		if card.Expiry == "" {
+			if card.Expiry, err = a.readLine("Срок действия: "); err != nil {
+				return nil, err
+			}
+		}
+		if card.CVV == "" {
+			if card.CVV, err = a.readPassword("CVV: "); err != nil {
+				return nil, err
+			}
 		}
 	}
-	if card.Expiry == "" {
-		if card.Expiry, err = a.readLine("Срок действия: "); err != nil {
-			return nil, err
-		}
-	}
-	if card.CVV == "" {
-		if card.CVV, err = a.readPassword("CVV: "); err != nil {
-			return nil, err
-		}
-	}
+
 	if card.Number == "" {
 		return nil, errors.New("номер карты не может быть пустым")
 	}

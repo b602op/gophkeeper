@@ -7,10 +7,28 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
 	bolt "go.etcd.io/bbolt"
 
 	"github.com/b602op/gophkeeper/internal/domain"
 )
+
+// TestOpen проверяет открытие локальной базы по пользователю с путём по
+// умолчанию. Каталоги клиента изолируются через t.Setenv: на Linux/macOS
+// используется HOME, на Windows — USERPROFILE и LOCALAPPDATA.
+func TestOpen(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)          // Linux/macOS
+	t.Setenv("USERPROFILE", tmp)   // Windows
+	t.Setenv("XDG_DATA_HOME", tmp) // Linux
+	t.Setenv("LOCALAPPDATA", tmp)  // Windows: используется в dataDir в первую очередь
+	t.Setenv("APPDATA", tmp)
+
+	store, err := Open("test-user-id")
+	require.NoError(t, err)
+	require.NotNil(t, store)
+	defer func() { _ = store.Close() }()
+}
 
 func openTestStore(t *testing.T) *SecretStore {
 	t.Helper()

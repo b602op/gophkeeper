@@ -148,13 +148,15 @@ func TestHandleGetSecret(t *testing.T) {
 		require.Equal(t, http.StatusNotFound, rec.Code)
 	})
 
-	t.Run("чужой секрет", func(t *testing.T) {
+	t.Run("чужой секрет отдаётся как не найденный", func(t *testing.T) {
+		// Сервис не отличает чужой секрет от несуществующего и возвращает
+		// domain.ErrSecretNotFound — наружу уходит 404, а не 403.
 		secrets := &stubSecrets{getFn: func(context.Context, string, string) (*domain.Secret, error) {
-			return nil, domain.ErrForbidden
+			return nil, domain.ErrSecretNotFound
 		}}
 		h := newSecretHandler(secrets)
 		rec := doRequest(t, h.Routes(), http.MethodGet, "/api/v1/secrets/secret-1", "")
-		require.Equal(t, http.StatusForbidden, rec.Code)
+		require.Equal(t, http.StatusNotFound, rec.Code)
 	})
 
 	t.Run("внутренняя ошибка", func(t *testing.T) {
@@ -191,13 +193,15 @@ func TestHandleUpdateSecret(t *testing.T) {
 		require.Equal(t, http.StatusConflict, rec.Code)
 	})
 
-	t.Run("чужой секрет", func(t *testing.T) {
+	t.Run("чужой секрет отдаётся как не найденный", func(t *testing.T) {
+		// Сервис не отличает чужой секрет от несуществующего и возвращает
+		// domain.ErrSecretNotFound — наружу уходит 404, а не 403.
 		secrets := &stubSecrets{updateFn: func(context.Context, string, *domain.Secret) error {
-			return domain.ErrForbidden
+			return domain.ErrSecretNotFound
 		}}
 		h := newSecretHandler(secrets)
 		rec := doRequest(t, h.Routes(), http.MethodPut, "/api/v1/secrets/secret-1", secretBody)
-		require.Equal(t, http.StatusForbidden, rec.Code)
+		require.Equal(t, http.StatusNotFound, rec.Code)
 	})
 
 	t.Run("валидация", func(t *testing.T) {
@@ -249,13 +253,15 @@ func TestHandleDeleteSecret(t *testing.T) {
 		require.Equal(t, http.StatusNotFound, rec.Code)
 	})
 
-	t.Run("чужой секрет", func(t *testing.T) {
+	t.Run("чужой секрет отдаётся как не найденный", func(t *testing.T) {
+		// Сервис не отличает чужой секрет от несуществующего и возвращает
+		// domain.ErrSecretNotFound — наружу уходит 404, а не 403.
 		secrets := &stubSecrets{deleteFn: func(context.Context, string, string) error {
-			return domain.ErrForbidden
+			return domain.ErrSecretNotFound
 		}}
 		h := newSecretHandler(secrets)
 		rec := doRequest(t, h.Routes(), http.MethodDelete, "/api/v1/secrets/secret-1", "")
-		require.Equal(t, http.StatusForbidden, rec.Code)
+		require.Equal(t, http.StatusNotFound, rec.Code)
 	})
 }
 

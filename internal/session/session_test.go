@@ -8,7 +8,29 @@ import (
 	"runtime"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
 )
+
+// TestNew проверяет конструктор сессии с путём токена по умолчанию.
+//
+// Каталоги клиента изолируются через t.Setenv: на Linux/macOS используется
+// HOME, на Windows — USERPROFILE и LOCALAPPDATA (dataDir отдаёт ему приоритет).
+func TestNew(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)          // Linux/macOS
+	t.Setenv("USERPROFILE", tmp)   // Windows
+	t.Setenv("XDG_DATA_HOME", tmp) // Linux
+	t.Setenv("LOCALAPPDATA", tmp)  // Windows: используется в dataDir в первую очередь
+	t.Setenv("APPDATA", tmp)
+
+	s, err := New()
+	require.NoError(t, err)
+	require.NotNil(t, s)
+
+	// Путь токена должен оказаться внутри изолированного каталога.
+	require.Contains(t, s.tokenPath, tmp)
+}
 
 func newTestSession(t *testing.T) *Session {
 	t.Helper()

@@ -19,7 +19,7 @@ const (
 	queryInsertSecret = `INSERT INTO secrets (id, user_id, type, name, metadata, data, version, created_at, updated_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`
 	querySelectSecretByID = `SELECT ` + secretColumns + ` FROM secrets
-		WHERE id = $1 AND deleted_at IS NULL`
+		WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL`
 	querySelectSecretsByUser = `SELECT ` + secretColumns + ` FROM secrets
 		WHERE user_id = $1 AND deleted_at IS NULL
 		ORDER BY updated_at DESC`
@@ -31,7 +31,8 @@ const (
 	queryUpdateSecret = `UPDATE secrets
 		SET type = $1, name = $2, metadata = $3, data = $4,
 		    version = version + 1, updated_at = NOW()
-		WHERE id = $5 AND user_id = $6 AND deleted_at IS NULL`
+		WHERE id = $5 AND user_id = $6 AND deleted_at IS NULL
+		RETURNING id, user_id, type, name, metadata, data, version, created_at, updated_at`
 	querySoftDeleteSecret = `UPDATE secrets
 		SET deleted_at = NOW(), updated_at = NOW(), version = version + 1
 		WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL`
@@ -66,11 +67,13 @@ func (r *SecretRepository) Create(ctx context.Context, secret *domain.Secret) er
 	return nil
 }
 
-// FindByID возвращает неудалённый секрет по идентификатору.
+// FindByID возвращает неудалённый секрет пользователя по идентификатору.
 //
-// Если секрет не найден или удалён, возвращает domain.ErrSecretNotFound.
-func (r *SecretRepository) FindByID(ctx context.Context, id string) (*domain.Secret, error) {
-	return scanSecret(r.db.QueryRowContext(ctx, querySelectSecretByID, id), id)
+// Условие по user_id делает чужой секрет неотличимым от несуществующего: в обоих
+// случаях возвращается domain.ErrSecretNotFound. Так сервер отвечает 404, а не
+// 403, и не раскрывает факт существования чужой записи (защита от перебора).
+func (r *SecretRepository) FindByID(ctx context.Context, userID, id string) (*domain.Secret, error) {
+	return scanSecret(r.db.QueryRowContext(ctx, querySelectSecretByID, id, userID), id)
 }
 
 // FindByUser возвращает неудалённые секреты пользователя.
@@ -104,6 +107,10 @@ func (r *SecretRepository) FindByUserSince(ctx context.Context, userID string, s
 // возвращается domain.ErrSecretVersionMismatch, при отсутствии записи —
 // domain.ErrSecretNotFound. Условие по user_id защищает от изменения чужого
 // секрета даже при ошибочной проверке на уровне сервиса.
+//
+// После успешного обновления в переданный secret записываются все поля из
+// базы, включая created_at, version и updated_at: клиент должен получить
+// актуальное состояние записи, иначе локальная копия разойдётся с сервером.
 func (r *SecretRepository) Update(ctx context.Context, secret *domain.Secret) error {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -126,9 +133,19 @@ func (r *SecretRepository) Update(ctx context.Context, secret *domain.Secret) er
 			secret.ID, secret.Version, currentVersion, domain.ErrSecretVersionMismatch)
 	}
 
-	_, err = tx.ExecContext(ctx, queryUpdateSecret,
+	row := tx.QueryRowContext(ctx, queryUpdateSecret,
 		secret.Type, secret.Name, secret.Metadata, secret.Data, secret.ID, secret.UserID)
-	if err != nil {
+	if err := row.Scan(
+		&secret.ID,
+		&secret.UserID,
+		&secret.Type,
+		&secret.Name,
+		&secret.Metadata,
+		&secret.Data,
+		&secret.Version,
+		&secret.CreatedAt,
+		&secret.UpdatedAt,
+	); err != nil {
 		return fmt.Errorf("обновление секрета %q: %w", secret.ID, err)
 	}
 

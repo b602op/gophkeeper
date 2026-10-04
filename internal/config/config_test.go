@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
 )
 
 const (
@@ -51,6 +53,50 @@ func TestLoadDefaults(t *testing.T) {
 	}
 	if cfg.EnableHTTPS {
 		t.Error("EnableHTTPS должен быть false по умолчанию")
+	}
+}
+
+func TestLoad(t *testing.T) {
+	tests := []struct {
+		name    string
+		args    []string
+		env     map[string]string
+		wantErr bool
+	}{
+		{
+			name:    "jwt_secret через флаг",
+			args:    []string{"-jwt-secret", testSecret, "-d", testDSN},
+			env:     map[string]string{},
+			wantErr: false,
+		},
+		{
+			name: "jwt_secret через env",
+			args: []string{"-d", testDSN},
+			env: map[string]string{
+				envJWTSecret: testSecret,
+			},
+			wantErr: false,
+		},
+		{
+			name:    "без jwt_secret — fail early",
+			args:    []string{"-d", testDSN},
+			env:     map[string]string{},
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg, err := load(tt.args, envMap(tt.env))
+
+			if tt.wantErr {
+				require.Error(t, err)
+				require.Nil(t, cfg)
+				return
+			}
+			require.NoError(t, err)
+			require.NotNil(t, cfg)
+		})
 	}
 }
 

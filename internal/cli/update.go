@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -66,8 +67,27 @@ func (a *app) runUpdate(ctx context.Context, id string, data *secretData) error 
 	if strings.TrimSpace(data.secretType) == "" {
 		data.secretType = string(existing.Type)
 	}
-	secretType, payload, err := a.buildPayload(data)
-	if err != nil {
+	secretType := domain.SecretType(strings.ToLower(strings.TrimSpace(data.secretType)))
+	if !secretType.IsValid() {
+		return fmt.Errorf("%w: %q", domain.ErrInvalidSecretType, data.secretType)
+	}
+
+	var payload []byte
+	if secretType == existing.Type {
+		// Частичное обновление накладывается на расшифрованные прежние данные,
+		// чтобы незаданные поля не затирались.
+		_, encoded, unpackErr := crypto.UnpackPayload(existing.Data)
+		if unpackErr != nil {
+			return unpackErr
+		}
+		plaintext, decErr := crypto.Decrypt(key, encoded)
+		if decErr != nil {
+			return decErr
+		}
+		if payload, err = a.buildUpdatePayload(data, secretType, plaintext); err != nil {
+			return err
+		}
+	} else if _, payload, err = a.buildPayload(data); err != nil {
 		return err
 	}
 

@@ -13,33 +13,37 @@ import (
 
 // newLoginCmd создаёт команду входа.
 func newLoginCmd(a *app) *cobra.Command {
-	var login string
+	var login, password string
 
 	cmd := &cobra.Command{
 		Use:   "login",
 		Short: "Войти и ввести мастер-пароль",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return a.runLogin(cmd.Context(), login)
+			return a.runLogin(cmd.Context(), login, password)
 		},
 	}
 	cmd.Flags().StringVar(&login, "login", "", "логин пользователя")
+	cmd.Flags().StringVar(&password, "password", "", "пароль сервера (если не задан, запрашивается интерактивно)")
 	return cmd
 }
 
 // runLogin аутентифицирует пользователя, сохраняет токен и кэширует мастер-ключ.
 //
 // Соль KDF восстанавливается из локальных или серверных записей, что позволяет
-// войти с нового устройства и получить тот же ключ шифрования.
-func (a *app) runLogin(ctx context.Context, login string) error {
+// войти с нового устройства и получить тот же ключ шифрования. Мастер-пароль
+// вводится интерактивно и на сервер не передаётся.
+func (a *app) runLogin(ctx context.Context, login, password string) error {
 	login = strings.TrimSpace(login)
 	if login == "" {
 		return errors.New("логин обязателен: укажите флаг --login")
 	}
 
-	password, err := a.readPassword("Пароль: ")
-	if err != nil {
-		return err
+	if password == "" {
+		var err error
+		if password, err = a.readPassword("Пароль: "); err != nil {
+			return err
+		}
 	}
 	if password == "" {
 		return errors.New("пароль не может быть пустым")

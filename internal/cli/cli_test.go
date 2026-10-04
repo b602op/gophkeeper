@@ -990,13 +990,22 @@ func TestLoginRecoversSaltFromServer(t *testing.T) {
 }
 
 func TestUpdateFromServer(t *testing.T) {
-	existing := &domain.Secret{ID: "id-1", Type: domain.SecretTypeText, Name: "Заметка", Version: 1, UpdatedAt: fixedNow}
+	salt, _ := crypto.GenerateSalt()
+	key := crypto.DeriveKey("master-pass", salt)
+	encoded, err := crypto.Encrypt(key, []byte(`{"text":"старый"}`))
+	if err != nil {
+		t.Fatalf("Encrypt вернул ошибку: %v", err)
+	}
+	data, err := crypto.PackPayload(salt, encoded)
+	if err != nil {
+		t.Fatalf("PackPayload вернул ошибку: %v", err)
+	}
+	existing := &domain.Secret{ID: "id-1", Type: domain.SecretTypeText, Name: "Заметка", Data: data, Version: 1, UpdatedAt: fixedNow}
 
 	env := newTestEnv(t, "")
 	env.authenticate(t, "user-1")
-	salt, _ := crypto.GenerateSalt()
 	env.sess.SetSalt(salt)
-	env.sess.SetMasterKey(crypto.DeriveKey("master-pass", salt))
+	env.sess.SetMasterKey(key)
 	env.client.getFn = func(context.Context, string) (*domain.Secret, error) {
 		return existing, nil
 	}
@@ -1066,5 +1075,301 @@ func TestSaltFromSecrets(t *testing.T) {
 	}
 	if _, ok := saltFromSecrets([]*domain.Secret{{Data: []byte("short")}}); ok {
 		t.Fatal("короткие данные не должны содержать соль")
+	}
+}
+
+func TestRegisterWithPasswordFlag(t *testing.T) {
+	// Пароль передан флагом: интерактивный ввод не требуется.
+	env := newTestEnv(t, "")
+	env.client.registerFn = func(_ context.Context, login, password string) (*domain.User, error) {
+		if password != "secret123" {
+			t.Errorf("пароль = %q", password)
+		}
+		return &domain.User{ID: "user-1", Login: login}, nil
+	}
+	env.client.loginFn = func(context.Context, string, string) (string, error) {
+		return "jwt-token", nil
+	}
+
+	if err := env.execute("register", "--login", "alice", "--password", "secret123"); err != nil {
+		t.Fatalf("register вернул ошибку: %v", err)
+	}
+	if token, err := env.sess.GetToken(); err != nil || token != "jwt-token" {
+		t.Fatalf("токен = %q, err = %v", token, err)
+	}
+}
+
+func TestLoginWithPasswordFlag(t *testing.T) {
+	env := newTestEnv(t, "master-pass\n")
+	env.client.loginFn = func(_ context.Context, login, password string) (string, error) {
+		if password != "secret123" {
+			t.Errorf("пароль = %q", password)
+		}
+		payload := base64.RawURLEncoding.EncodeToString([]byte(`{"sub":"user-1"}`))
+		return "header." + payload + ".sig", nil
+	}
+
+	if err := env.execute("login", "--login", "alice", "--password", "secret123"); err != nil {
+		t.Fatalf("login вернул ошибку: %v", err)
+	}
+	if _, err := env.sess.GetMasterKey(); err != nil {
+		t.Fatalf("мастер-ключ не кэширован: %v", err)
+	}
+}
+
+func TestAddCardWithFlags(t *testing.T) {
+	env := newTestEnv(t, "")
+	env.authenticate(t, "user-1")
+	salt, _ := crypto.GenerateSalt()
+	env.sess.SetSalt(salt)
+	env.sess.SetMasterKey(crypto.DeriveKey("master-pass", salt))
+
+	var created *domain.Secret
+	env.client.createFn = func(_ context.Context, secret *domain.Secret) (*domain.Secret, error) {
+		created = secret
+		result := *secret
+		result.ID = "srv-1"
+		return &result, nil
+	}
+
+	err := env.execute("add", "Sber", "--type", "card",
+		"--card-number", "1234567890123456", "--card-holder", "ALICE",
+		"--cvv", "123", "--expiry", "12/26")
+	if err != nil {
+		t.Fatalf("add вернул ошибку: %v", err)
+	}
+
+	_, encoded, err := crypto.UnpackPayload(created.Data)
+	if err != nil {
+		t.Fatalf("UnpackPayload вернул ошибку: %v", err)
+	}
+	key, _ := env.sess.GetMasterKey()
+	plaintext, err := crypto.Decrypt(key, encoded)
+	if err != nil {
+		t.Fatalf("Decrypt вернул ошибку: %v", err)
+	}
+	for _, want := range []string{"1234567890123456", "ALICE", "123", "12/26"} {
+		if !strings.Contains(string(plaintext), want) {
+			t.Fatalf("данные карты %q не содержат %q", plaintext, want)
+		}
+	}
+}
+
+func TestUpdateMergeCredentials(t *testing.T) {
+	salt, _ := crypto.GenerateSalt()
+	key := crypto.DeriveKey("master-pass", salt)
+	encoded, err := crypto.Encrypt(key, []byte(`{"username":"alice","password":"old"}`))
+	if err != nil {
+		t.Fatalf("Encrypt вернул ошибку: %v", err)
+	}
+	data, err := crypto.PackPayload(salt, encoded)
+	if err != nil {
+		t.Fatalf("PackPayload вернул ошибку: %v", err)
+	}
+
+	env := newTestEnv(t, "")
+	env.authenticate(t, "user-1")
+	env.sess.SetSalt(salt)
+	env.sess.SetMasterKey(key)
+	_ = env.store.Save(&domain.Secret{ID: "id-1", Type: domain.SecretTypeCredentials, Name: "GitHub", Data: data, Version: 1, UpdatedAt: fixedNow})
+
+	var sent *domain.Secret
+	env.client.updateFn = func(_ context.Context, s *domain.Secret) (*domain.Secret, error) {
+		sent = s
+		updated := *s
+		updated.Version = 2
+		return &updated, nil
+	}
+
+	// Меняем только пароль: логин должен сохраниться из существующих данных.
+	if runErr := env.execute("update", "id-1", "--password", "new"); runErr != nil {
+		t.Fatalf("update вернул ошибку: %v", runErr)
+	}
+	if sent == nil {
+		t.Fatal("обновление не отправлено")
+	}
+	_, encoded, err = crypto.UnpackPayload(sent.Data)
+	if err != nil {
+		t.Fatalf("UnpackPayload вернул ошибку: %v", err)
+	}
+	plaintext, err := crypto.Decrypt(key, encoded)
+	if err != nil {
+		t.Fatalf("Decrypt вернул ошибку: %v", err)
+	}
+	if !strings.Contains(string(plaintext), "alice") {
+		t.Fatalf("логин потерян при частичном обновлении: %q", plaintext)
+	}
+	if !strings.Contains(string(plaintext), "new") {
+		t.Fatalf("новый пароль не сохранён: %q", plaintext)
+	}
+}
+
+func TestUpdateBinaryKeepsExisting(t *testing.T) {
+	salt, _ := crypto.GenerateSalt()
+	key := crypto.DeriveKey("master-pass", salt)
+	encoded, err := crypto.Encrypt(key, []byte{0x01, 0x02, 0x03})
+	if err != nil {
+		t.Fatalf("Encrypt вернул ошибку: %v", err)
+	}
+	data, err := crypto.PackPayload(salt, encoded)
+	if err != nil {
+		t.Fatalf("PackPayload вернул ошибку: %v", err)
+	}
+
+	env := newTestEnv(t, "")
+	env.authenticate(t, "user-1")
+	env.sess.SetSalt(salt)
+	env.sess.SetMasterKey(key)
+	_ = env.store.Save(&domain.Secret{ID: "id-1", Type: domain.SecretTypeBinary, Name: "Файл", Data: data, Version: 1, UpdatedAt: fixedNow})
+	env.client.updateFn = func(_ context.Context, s *domain.Secret) (*domain.Secret, error) {
+		updated := *s
+		updated.Version = 2
+		return &updated, nil
+	}
+
+	// Без --file бинарные данные должны сохраниться.
+	if err := env.execute("update", "id-1", "--metadata", "новая метка"); err != nil {
+		t.Fatalf("update вернул ошибку: %v", err)
+	}
+}
+
+func TestUpdateChangeType(t *testing.T) {
+	salt, _ := crypto.GenerateSalt()
+	key := crypto.DeriveKey("master-pass", salt)
+	encoded, err := crypto.Encrypt(key, []byte(`{"text":"старый"}`))
+	if err != nil {
+		t.Fatalf("Encrypt вернул ошибку: %v", err)
+	}
+	data, err := crypto.PackPayload(salt, encoded)
+	if err != nil {
+		t.Fatalf("PackPayload вернул ошибку: %v", err)
+	}
+
+	env := newTestEnv(t, "")
+	env.authenticate(t, "user-1")
+	env.sess.SetSalt(salt)
+	env.sess.SetMasterKey(key)
+	_ = env.store.Save(&domain.Secret{ID: "id-1", Type: domain.SecretTypeText, Name: "Заметка", Data: data, Version: 1, UpdatedAt: fixedNow})
+
+	var sent *domain.Secret
+	env.client.updateFn = func(_ context.Context, s *domain.Secret) (*domain.Secret, error) {
+		sent = s
+		updated := *s
+		updated.Version = 2
+		return &updated, nil
+	}
+
+	// Смена типа собирает данные заново из флагов.
+	if err := env.execute("update", "id-1", "--type", "credentials", "--username", "bob", "--password", "p"); err != nil {
+		t.Fatalf("update вернул ошибку: %v", err)
+	}
+	if sent.Type != domain.SecretTypeCredentials {
+		t.Fatalf("тип = %q, ожидалось credentials", sent.Type)
+	}
+}
+
+// encryptedText сохраняет в локальном хранилище зашифрованную запись и
+// возвращает ключ с солью.
+func encryptedText(t *testing.T, env *testEnv, secretType domain.SecretType, payload string) []byte {
+	t.Helper()
+
+	salt, _ := crypto.GenerateSalt()
+	key := crypto.DeriveKey("master-pass", salt)
+	encoded, err := crypto.Encrypt(key, []byte(payload))
+	if err != nil {
+		t.Fatalf("Encrypt вернул ошибку: %v", err)
+	}
+	data, err := crypto.PackPayload(salt, encoded)
+	if err != nil {
+		t.Fatalf("PackPayload вернул ошибку: %v", err)
+	}
+	env.sess.SetSalt(salt)
+	env.sess.SetMasterKey(key)
+	_ = env.store.Save(&domain.Secret{ID: "id-1", Type: secretType, Name: "Заметка", Data: data, Version: 1, UpdatedAt: fixedNow})
+	return key
+}
+
+func TestUpdateMergeCard(t *testing.T) {
+	env := newTestEnv(t, "")
+	env.authenticate(t, "user-1")
+	encryptedText(t, env, domain.SecretTypeCard, `{"number":"4111","holder":"Alice","expiry":"12/30","cvv":"111"}`)
+
+	var sent *domain.Secret
+	env.client.updateFn = func(_ context.Context, s *domain.Secret) (*domain.Secret, error) {
+		sent = s
+		updated := *s
+		updated.Version = 2
+		return &updated, nil
+	}
+
+	// Меняем только CVV: остальные поля карты должны сохраниться.
+	if err := env.execute("update", "id-1", "--cvv", "999"); err != nil {
+		t.Fatalf("update вернул ошибку: %v", err)
+	}
+	_, encoded, err := crypto.UnpackPayload(sent.Data)
+	if err != nil {
+		t.Fatalf("UnpackPayload вернул ошибку: %v", err)
+	}
+	key, _ := env.sess.GetMasterKey()
+	plaintext, err := crypto.Decrypt(key, encoded)
+	if err != nil {
+		t.Fatalf("Decrypt вернул ошибку: %v", err)
+	}
+	for _, want := range []string{"4111", "Alice", "12/30", "999"} {
+		if !strings.Contains(string(plaintext), want) {
+			t.Fatalf("данные карты %q не содержат %q", plaintext, want)
+		}
+	}
+}
+
+func TestUpdateMergeText(t *testing.T) {
+	env := newTestEnv(t, "")
+	env.authenticate(t, "user-1")
+	encryptedText(t, env, domain.SecretTypeText, `{"text":"старый"}`)
+	env.client.updateFn = func(_ context.Context, s *domain.Secret) (*domain.Secret, error) {
+		updated := *s
+		updated.Version = 2
+		return &updated, nil
+	}
+
+	if err := env.execute("update", "id-1", "--text", "новый"); err != nil {
+		t.Fatalf("update вернул ошибку: %v", err)
+	}
+}
+
+func TestUpdateBinaryWithoutFile(t *testing.T) {
+	// Бинарная запись с пустыми данными не может быть обновлена без --file.
+	env := newTestEnv(t, "")
+	env.authenticate(t, "user-1")
+	salt, _ := crypto.GenerateSalt()
+	env.sess.SetSalt(salt)
+	env.sess.SetMasterKey(crypto.DeriveKey("master-pass", salt))
+	_ = env.store.Save(&domain.Secret{ID: "id-1", Type: domain.SecretTypeBinary, Name: "Файл", Version: 1, UpdatedAt: fixedNow})
+
+	if err := env.execute("update", "id-1", "--metadata", "x"); err == nil {
+		t.Fatal("ожидалась ошибка")
+	}
+}
+
+func TestUpdateCorruptedExisting(t *testing.T) {
+	env := newTestEnv(t, "")
+	env.authenticate(t, "user-1")
+	salt, _ := crypto.GenerateSalt()
+	env.sess.SetSalt(salt)
+	env.sess.SetMasterKey(crypto.DeriveKey("master-pass", salt))
+	// Данные не являются корректным шифротекстом: merge должен упасть.
+	_ = env.store.Save(&domain.Secret{ID: "id-1", Type: domain.SecretTypeText, Name: "Заметка", Data: []byte("bad"), Version: 1, UpdatedAt: fixedNow})
+
+	if err := env.execute("update", "id-1", "--text", "новый"); err == nil {
+		t.Fatal("ожидалась ошибка")
+	}
+}
+
+func TestDecodeExistingInvalid(t *testing.T) {
+	if err := decodeExisting([]byte("{"), &textPayload{}); err == nil {
+		t.Fatal("ожидалась ошибка разбора")
+	}
+	if err := decodeExisting(nil, &textPayload{}); err != nil {
+		t.Fatalf("пустые данные не должны давать ошибку: %v", err)
 	}
 }

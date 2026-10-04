@@ -14,7 +14,7 @@ import (
 // stubSecretRepo — управляемый мок репозитория секретов.
 type stubSecretRepo struct {
 	createFn          func(ctx context.Context, secret *domain.Secret) error
-	findByIDFn        func(ctx context.Context, id string) (*domain.Secret, error)
+	findByIDFn        func(ctx context.Context, userID, id string) (*domain.Secret, error)
 	findByUserFn      func(ctx context.Context, userID string) ([]*domain.Secret, error)
 	findByUserSinceFn func(ctx context.Context, userID string, since time.Time) ([]*domain.Secret, error)
 	updateFn          func(ctx context.Context, secret *domain.Secret) error
@@ -28,11 +28,11 @@ func (s *stubSecretRepo) Create(ctx context.Context, secret *domain.Secret) erro
 	return s.createFn(ctx, secret)
 }
 
-func (s *stubSecretRepo) FindByID(ctx context.Context, id string) (*domain.Secret, error) {
+func (s *stubSecretRepo) FindByID(ctx context.Context, userID, id string) (*domain.Secret, error) {
 	if s.findByIDFn == nil {
 		return nil, domain.ErrSecretNotFound
 	}
-	return s.findByIDFn(ctx, id)
+	return s.findByIDFn(ctx, userID, id)
 }
 
 func (s *stubSecretRepo) FindByUser(ctx context.Context, userID string) ([]*domain.Secret, error) {
@@ -165,7 +165,9 @@ func TestSecretServiceGet(t *testing.T) {
 	stored.UserID = "user-1"
 
 	t.Run("успех", func(t *testing.T) {
-		repo := &stubSecretRepo{findByIDFn: func(context.Context, string) (*domain.Secret, error) {
+		repo := &stubSecretRepo{findByIDFn: func(_ context.Context, userID, id string) (*domain.Secret, error) {
+			require.Equal(t, "user-1", userID)
+			require.Equal(t, "secret-1", id)
 			return stored, nil
 		}}
 		svc := newTestSecretService(repo)
@@ -176,7 +178,7 @@ func TestSecretServiceGet(t *testing.T) {
 	})
 
 	t.Run("не найдено", func(t *testing.T) {
-		repo := &stubSecretRepo{findByIDFn: func(context.Context, string) (*domain.Secret, error) {
+		repo := &stubSecretRepo{findByIDFn: func(context.Context, string, string) (*domain.Secret, error) {
 			return nil, domain.ErrSecretNotFound
 		}}
 		svc := newTestSecretService(repo)
@@ -185,19 +187,25 @@ func TestSecretServiceGet(t *testing.T) {
 		require.ErrorIs(t, err, domain.ErrSecretNotFound)
 	})
 
-	t.Run("чужой секрет", func(t *testing.T) {
-		repo := &stubSecretRepo{findByIDFn: func(context.Context, string) (*domain.Secret, error) {
+	t.Run("чужой секрет неотличим от несуществующего", func(t *testing.T) {
+		// Владение проверяет репозиторий через user_id в SQL: для чужого
+		// пользователя возвращается ErrSecretNotFound (HTTP 404), а не 403.
+		repo := &stubSecretRepo{findByIDFn: func(_ context.Context, userID, _ string) (*domain.Secret, error) {
+			if userID != stored.UserID {
+				return nil, domain.ErrSecretNotFound
+			}
 			return stored, nil
 		}}
 		svc := newTestSecretService(repo)
 
 		_, err := svc.Get(context.Background(), "intruder", "secret-1")
-		require.ErrorIs(t, err, domain.ErrForbidden)
+		require.ErrorIs(t, err, domain.ErrSecretNotFound)
+		require.NotErrorIs(t, err, domain.ErrForbidden)
 	})
 
 	t.Run("ошибка репозитория", func(t *testing.T) {
 		dbErr := errors.New("сбой")
-		repo := &stubSecretRepo{findByIDFn: func(context.Context, string) (*domain.Secret, error) {
+		repo := &stubSecretRepo{findByIDFn: func(context.Context, string, string) (*domain.Secret, error) {
 			return nil, dbErr
 		}}
 		svc := newTestSecretService(repo)
@@ -239,15 +247,9 @@ func TestSecretServiceList(t *testing.T) {
 }
 
 func TestSecretServiceUpdate(t *testing.T) {
-	stored := validSecret()
-	stored.ID = "secret-1"
-	stored.UserID = "user-1"
-	stored.Version = 3
-
 	t.Run("успех", func(t *testing.T) {
 		var updated *domain.Secret
 		repo := &stubSecretRepo{
-			findByIDFn: func(context.Context, string) (*domain.Secret, error) { return stored, nil },
 			updateFn: func(_ context.Context, s *domain.Secret) error {
 				updated = s
 				return nil
@@ -263,21 +265,25 @@ func TestSecretServiceUpdate(t *testing.T) {
 		require.Equal(t, "user-1", secret.UserID)
 	})
 
-	t.Run("чужой секрет", func(t *testing.T) {
-		repo := &stubSecretRepo{findByIDFn: func(context.Context, string) (*domain.Secret, error) { return stored, nil }}
+	t.Run("чужой секрет неотличим от несуществующего", func(t *testing.T) {
+		// Владение проверяет репозиторий через user_id в SQL: обновление
+		// чужого секрета даёт ErrSecretNotFound (HTTP 404), а не 403.
+		repo := &stubSecretRepo{
+			updateFn: func(context.Context, *domain.Secret) error { return domain.ErrSecretNotFound },
+		}
 		svc := newTestSecretService(repo)
 
 		secret := validSecret()
 		secret.ID = "secret-1"
 		secret.Version = 3
 		err := svc.Update(context.Background(), "intruder", secret)
-		require.ErrorIs(t, err, domain.ErrForbidden)
+		require.ErrorIs(t, err, domain.ErrSecretNotFound)
+		require.NotErrorIs(t, err, domain.ErrForbidden)
 	})
 
 	t.Run("конфликт версий", func(t *testing.T) {
 		repo := &stubSecretRepo{
-			findByIDFn: func(context.Context, string) (*domain.Secret, error) { return stored, nil },
-			updateFn:   func(context.Context, *domain.Secret) error { return domain.ErrSecretVersionMismatch },
+			updateFn: func(context.Context, *domain.Secret) error { return domain.ErrSecretVersionMismatch },
 		}
 		svc := newTestSecretService(repo)
 
@@ -289,9 +295,9 @@ func TestSecretServiceUpdate(t *testing.T) {
 	})
 
 	t.Run("невалидные данные", func(t *testing.T) {
-		repo := &stubSecretRepo{findByIDFn: func(context.Context, string) (*domain.Secret, error) {
+		repo := &stubSecretRepo{updateFn: func(context.Context, *domain.Secret) error {
 			t.Fatal("репозиторий не должен вызываться при невалидных данных")
-			return nil, nil
+			return nil
 		}}
 		svc := newTestSecretService(repo)
 
@@ -303,9 +309,9 @@ func TestSecretServiceUpdate(t *testing.T) {
 	})
 
 	t.Run("не найдено", func(t *testing.T) {
-		repo := &stubSecretRepo{findByIDFn: func(context.Context, string) (*domain.Secret, error) {
-			return nil, domain.ErrSecretNotFound
-		}}
+		repo := &stubSecretRepo{
+			updateFn: func(context.Context, *domain.Secret) error { return domain.ErrSecretNotFound },
+		}
 		svc := newTestSecretService(repo)
 
 		secret := validSecret()
@@ -316,14 +322,9 @@ func TestSecretServiceUpdate(t *testing.T) {
 }
 
 func TestSecretServiceDelete(t *testing.T) {
-	stored := validSecret()
-	stored.ID = "secret-1"
-	stored.UserID = "user-1"
-
 	t.Run("успех", func(t *testing.T) {
 		deleted := false
 		repo := &stubSecretRepo{
-			findByIDFn: func(context.Context, string) (*domain.Secret, error) { return stored, nil },
 			softDeleteFn: func(_ context.Context, id, userID string) error {
 				deleted = true
 				require.Equal(t, "secret-1", id)
@@ -337,18 +338,23 @@ func TestSecretServiceDelete(t *testing.T) {
 		require.True(t, deleted)
 	})
 
-	t.Run("чужой секрет", func(t *testing.T) {
-		repo := &stubSecretRepo{findByIDFn: func(context.Context, string) (*domain.Secret, error) { return stored, nil }}
+	t.Run("чужой секрет неотличим от несуществующего", func(t *testing.T) {
+		// Владение проверяет репозиторий через user_id в SQL: удаление чужого
+		// секрета даёт ErrSecretNotFound (HTTP 404), а не 403.
+		repo := &stubSecretRepo{
+			softDeleteFn: func(context.Context, string, string) error { return domain.ErrSecretNotFound },
+		}
 		svc := newTestSecretService(repo)
 
 		err := svc.Delete(context.Background(), "intruder", "secret-1")
-		require.ErrorIs(t, err, domain.ErrForbidden)
+		require.ErrorIs(t, err, domain.ErrSecretNotFound)
+		require.NotErrorIs(t, err, domain.ErrForbidden)
 	})
 
 	t.Run("не найдено", func(t *testing.T) {
-		repo := &stubSecretRepo{findByIDFn: func(context.Context, string) (*domain.Secret, error) {
-			return nil, domain.ErrSecretNotFound
-		}}
+		repo := &stubSecretRepo{
+			softDeleteFn: func(context.Context, string, string) error { return domain.ErrSecretNotFound },
+		}
 		svc := newTestSecretService(repo)
 
 		err := svc.Delete(context.Background(), "user-1", "absent")
@@ -358,7 +364,6 @@ func TestSecretServiceDelete(t *testing.T) {
 	t.Run("ошибка удаления", func(t *testing.T) {
 		dbErr := errors.New("сбой")
 		repo := &stubSecretRepo{
-			findByIDFn:   func(context.Context, string) (*domain.Secret, error) { return stored, nil },
 			softDeleteFn: func(context.Context, string, string) error { return dbErr },
 		}
 		svc := newTestSecretService(repo)

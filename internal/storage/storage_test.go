@@ -286,6 +286,49 @@ func TestSearch(t *testing.T) {
 	}
 }
 
+// TestSearchIterStopsEarly проверяет, что ленивый обход корректно реагирует на
+// досрочную остановку: сигнал остановки не просачивается наружу как ошибка.
+func TestSearchIterStopsEarly(t *testing.T) {
+	store := openTestStore(t)
+	for _, id := range []string{"id-1", "id-2", "id-3"} {
+		if err := store.Save(testSecret(id)); err != nil {
+			t.Fatalf("Save(%q) вернул ошибку: %v", id, err)
+		}
+	}
+
+	seq, iterErr := store.searchIter("")
+	seen := 0
+	for range seq {
+		seen++
+		break
+	}
+	if *iterErr != nil {
+		t.Fatalf("iterErr = %v, ожидалось nil", *iterErr)
+	}
+	if seen != 1 {
+		t.Fatalf("обход остановился после %d записей, ожидалась 1", seen)
+	}
+}
+
+// TestSearchIterPropagatesError проверяет, что ошибка разбора повреждённой
+// записи доходит до вызывающей стороны через указатель iterErr.
+func TestSearchIterPropagatesError(t *testing.T) {
+	store := openTestStore(t)
+	err := store.db.Update(func(tx *bolt.Tx) error {
+		return tx.Bucket(bucketSecrets).Put([]byte("bad"), []byte("{"))
+	})
+	if err != nil {
+		t.Fatalf("Update вернул ошибку: %v", err)
+	}
+
+	seq, iterErr := store.searchIter("")
+	for range seq {
+	}
+	if *iterErr == nil {
+		t.Fatal("ожидалась ошибка разбора через iterErr")
+	}
+}
+
 func TestDelete(t *testing.T) {
 	store := openTestStore(t)
 

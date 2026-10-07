@@ -83,6 +83,13 @@ cover: ## Посчитать покрытие и собрать HTML-отчёт
 	@echo "$(GREEN) Coverage OK$(RESET) → $(COVER_HTML)"
 	@echo ""
 
+.PHONY: bench
+bench: ## Запустить бенчмарки (crypto, storage)
+	@echo "=== Bench ==="
+	@go test -bench=. -benchmem -run=^$$ ./...
+	@echo "$(GREEN) Bench OK$(RESET)"
+	@echo ""
+
 # =============================================================================
 # Линтинг
 # =============================================================================

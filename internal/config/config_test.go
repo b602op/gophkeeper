@@ -425,3 +425,50 @@ func TestLoadLogLevelTrim(t *testing.T) {
 		t.Errorf("LogLevel = %q, ожидалось DEBUG", cfg.LogLevel)
 	}
 }
+
+// TestLoadUsesOSEnvironment проверяет публичную обёртку Load поверх os.Getenv.
+func TestLoadUsesOSEnvironment(t *testing.T) {
+	t.Setenv(envJWTSecret, testSecret)
+	t.Setenv(envDatabaseDSN, testDSN)
+
+	cfg, err := Load(nil)
+	if err != nil {
+		t.Fatalf("Load вернул ошибку: %v", err)
+	}
+	if cfg.JWTSecret != testSecret {
+		t.Fatalf("JWTSecret = %q, ожидалось значение из окружения", cfg.JWTSecret)
+	}
+}
+
+// TestApplyDefaults проверяет, что шаг дефолтов заполняет пустую конфигурацию.
+func TestApplyDefaults(t *testing.T) {
+	cfg := &Config{}
+	if err := applyDefaults(cfg); err != nil {
+		t.Fatalf("applyDefaults вернул ошибку: %v", err)
+	}
+	if cfg.RunAddress != defaultRunAddress {
+		t.Fatalf("RunAddress = %q, ожидалось %q", cfg.RunAddress, defaultRunAddress)
+	}
+}
+
+// TestApplyFileEmptyPathIsNoop проверяет, что при отсутствии файла шаг ничего
+// не делает и не затирает значения предыдущих шагов.
+func TestApplyFileEmptyPathIsNoop(t *testing.T) {
+	cfg := &Config{RunAddress: "keep:1"}
+	if err := applyFile("")(cfg); err != nil {
+		t.Fatalf("applyFile(\"\") вернул ошибку: %v", err)
+	}
+	if cfg.RunAddress != "keep:1" {
+		t.Fatalf("applyFile(\"\") изменил конфигурацию: %q", cfg.RunAddress)
+	}
+}
+
+// TestLoadFileErrorFailsFast проверяет, что ошибка файла прерывает загрузку и не
+// маскируется последующими валидными флагами.
+func TestLoadFileErrorFailsFast(t *testing.T) {
+	invalid := writeConfig(t, `{not-json`)
+	_, err := load([]string{"-c", invalid, "-jwt-secret", testSecret, "-d", testDSN}, envMap(nil))
+	if !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("ожидалась ErrInvalidConfig, получено: %v", err)
+	}
+}

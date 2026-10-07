@@ -117,6 +117,85 @@ func TestSaveOverwrites(t *testing.T) {
 	}
 }
 
+func TestSaveFromServer(t *testing.T) {
+	store := openTestStore(t)
+
+	t.Run("новая запись сохраняется", func(t *testing.T) {
+		secret := testSecret("id-1")
+		secret.Version = 3
+		if err := store.SaveFromServer(secret); err != nil {
+			t.Fatalf("SaveFromServer вернул ошибку: %v", err)
+		}
+		got, err := store.Get("id-1")
+		if err != nil {
+			t.Fatalf("Get вернул ошибку: %v", err)
+		}
+		if got.Version != 3 {
+			t.Fatalf("Version = %d, ожидалось 3", got.Version)
+		}
+	})
+
+	t.Run("более новая серверная версия перезаписывает", func(t *testing.T) {
+		newer := testSecret("id-1")
+		newer.Version = 5
+		newer.Name = "Серверная новая"
+		if err := store.SaveFromServer(newer); err != nil {
+			t.Fatalf("SaveFromServer вернул ошибку: %v", err)
+		}
+		got, err := store.Get("id-1")
+		if err != nil {
+			t.Fatalf("Get вернул ошибку: %v", err)
+		}
+		if got.Version != 5 || got.Name != "Серверная новая" {
+			t.Fatalf("Get вернул %+v, ожидалась версия 5", got)
+		}
+	})
+
+	t.Run("более старая серверная версия не перезаписывает", func(t *testing.T) {
+		older := testSecret("id-1")
+		older.Version = 2
+		older.Name = "Серверная старая"
+		if err := store.SaveFromServer(older); err != nil {
+			t.Fatalf("SaveFromServer вернул ошибку: %v", err)
+		}
+		got, err := store.Get("id-1")
+		if err != nil {
+			t.Fatalf("Get вернул ошибку: %v", err)
+		}
+		if got.Version != 5 || got.Name != "Серверная новая" {
+			t.Fatalf("старая версия затёрла новую: %+v", got)
+		}
+	})
+
+	t.Run("равная версия не перезаписывает (идемпотентность)", func(t *testing.T) {
+		same := testSecret("id-1")
+		same.Version = 5
+		same.Name = "Другое имя"
+		if err := store.SaveFromServer(same); err != nil {
+			t.Fatalf("SaveFromServer вернул ошибку: %v", err)
+		}
+		got, err := store.Get("id-1")
+		if err != nil {
+			t.Fatalf("Get вернул ошибку: %v", err)
+		}
+		if got.Name != "Серверная новая" {
+			t.Fatalf("равная версия перезаписала запись: %+v", got)
+		}
+	})
+
+	t.Run("пустой id — ошибка", func(t *testing.T) {
+		if err := store.SaveFromServer(testSecret("")); err == nil {
+			t.Fatal("ожидалась ошибка для пустого id")
+		}
+	})
+
+	t.Run("nil — ошибка", func(t *testing.T) {
+		if err := store.SaveFromServer(nil); err == nil {
+			t.Fatal("ожидалась ошибка для nil")
+		}
+	})
+}
+
 func TestSaveInvalid(t *testing.T) {
 	store := openTestStore(t)
 

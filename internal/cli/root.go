@@ -38,12 +38,13 @@ type apiClient interface {
 	ListSecrets(ctx context.Context) ([]*domain.Secret, error)
 	UpdateSecret(ctx context.Context, secret *domain.Secret) (*domain.Secret, error)
 	DeleteSecret(ctx context.Context, id string) error
-	Sync(ctx context.Context, since time.Time) ([]*domain.Secret, error)
+	Sync(ctx context.Context, since time.Time) (*api.SyncResult, error)
 }
 
 // secretStore описывает локальное хранилище секретов, нужное командам.
 type secretStore interface {
 	Save(secret *domain.Secret) error
+	SaveFromServer(secret *domain.Secret) error
 	Get(id string) (*domain.Secret, error)
 	List() ([]*domain.Secret, error)
 	Search(query string) ([]*domain.Secret, error)
@@ -65,7 +66,6 @@ type app struct {
 	newClient  func(baseURL string) apiClient
 	openStore  func(userID string) (secretStore, error)
 	loadConfig func() (*clientconfig.Config, error)
-	now        func() time.Time
 }
 
 // NewRootCommand создаёт корневую команду клиента.
@@ -83,7 +83,6 @@ func newApp() *app {
 		newClient:  func(baseURL string) apiClient { return api.New(baseURL) },
 		openStore:  func(userID string) (secretStore, error) { return storage.Open(userID) },
 		loadConfig: clientconfig.Load,
-		now:        time.Now,
 	}
 }
 

@@ -41,6 +41,57 @@ func (s *SecretStore) Save(secret *domain.Secret) error {
 	})
 }
 
+// SaveFromServer применяет серверную запись идемпотентно.
+//
+// В отличие от Save, который безусловно перезаписывает запись по id, этот метод
+// сверяет версии:
+//
+//   - локальной записи нет — сохранить;
+//   - локальная версия меньше серверной — перезаписать;
+//   - локальная версия не меньше серверной — пропустить.
+//
+// Это делает применение изменений при синхронизации идемпотентным: повторный
+// приход той же записи (например, если клиент завершился между применением
+// данных и сохранением last_sync) не ломает состояние, а более старая серверная
+// версия не затирает более новую локальную.
+func (s *SecretStore) SaveFromServer(secret *domain.Secret) error {
+	if secret == nil {
+		return errors.New("секрет не задан")
+	}
+	if strings.TrimSpace(secret.ID) == "" {
+		return errors.New("идентификатор секрета пуст")
+	}
+
+	data, err := json.Marshal(secret)
+	if err != nil {
+		return fmt.Errorf("сериализация секрета %q: %w", secret.ID, err)
+	}
+
+	return s.update(func(tx *bolt.Tx) error {
+		b := tx.Bucket(bucketSecrets)
+		if b == nil {
+			return ErrBucketMissing
+		}
+
+		// Сверка версий и запись выполняются в одной транзакции: между чтением
+		// локальной версии и записью не может вклиниться другое обновление.
+		if raw := b.Get([]byte(secret.ID)); raw != nil {
+			var local domain.Secret
+			if err := json.Unmarshal(raw, &local); err != nil {
+				return fmt.Errorf("разбор секрета %q: %w", secret.ID, err)
+			}
+			if local.Version >= secret.Version {
+				return nil
+			}
+		}
+
+		if err := b.Put([]byte(secret.ID), data); err != nil {
+			return fmt.Errorf("сохранение секрета %q: %w", secret.ID, err)
+		}
+		return nil
+	})
+}
+
 // Get возвращает секрет по идентификатору.
 //
 // Отсутствующая запись даёт domain.ErrSecretNotFound.

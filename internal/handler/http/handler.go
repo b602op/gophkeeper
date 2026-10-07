@@ -50,11 +50,14 @@ type Handler struct {
 	auth    AuthService
 	secrets SecretService
 	log     *slog.Logger
+
+	// now внедряется для детерминированных тестов watermark синхронизации.
+	now func() time.Time
 }
 
 // New создаёт HTTP-хендлер.
 func New(auth AuthService, secrets SecretService, log *slog.Logger) *Handler {
-	return &Handler{auth: auth, secrets: secrets, log: log}
+	return &Handler{auth: auth, secrets: secrets, log: log, now: time.Now}
 }
 
 // Routes регистрирует маршруты API и возвращает готовый http.Handler.

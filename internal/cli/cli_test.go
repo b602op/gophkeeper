@@ -38,6 +38,15 @@ func (m *memStore) Save(secret *domain.Secret) error {
 	return nil
 }
 
+// SaveFromServer повторяет идемпотентную логику storage.SaveFromServer:
+// запись применяется только если локальная версия меньше серверной.
+func (m *memStore) SaveFromServer(secret *domain.Secret) error {
+	if local, ok := m.secrets[secret.ID]; ok && local.Version >= secret.Version {
+		return nil
+	}
+	return m.Save(secret)
+}
+
 func (m *memStore) Get(id string) (*domain.Secret, error) {
 	secret, ok := m.secrets[id]
 	if !ok {
@@ -103,7 +112,7 @@ type fakeClient struct {
 	listFn     func(ctx context.Context) ([]*domain.Secret, error)
 	updateFn   func(ctx context.Context, secret *domain.Secret) (*domain.Secret, error)
 	deleteFn   func(ctx context.Context, id string) error
-	syncFn     func(ctx context.Context, since time.Time) ([]*domain.Secret, error)
+	syncFn     func(ctx context.Context, since time.Time) (*api.SyncResult, error)
 }
 
 func (f *fakeClient) SetToken(token string) { f.token = token }
@@ -162,11 +171,11 @@ func (f *fakeClient) DeleteSecret(ctx context.Context, id string) error {
 	return nil
 }
 
-func (f *fakeClient) Sync(ctx context.Context, since time.Time) ([]*domain.Secret, error) {
+func (f *fakeClient) Sync(ctx context.Context, since time.Time) (*api.SyncResult, error) {
 	if f.syncFn != nil {
 		return f.syncFn(ctx, since)
 	}
-	return nil, nil
+	return &api.SyncResult{}, nil
 }
 
 // testEnv объединяет подставные зависимости одного теста.
@@ -196,7 +205,6 @@ func newTestEnv(t *testing.T, input string) *testEnv {
 		loadConfig: func() (*clientconfig.Config, error) {
 			return &clientconfig.Config{ServerAddress: "http://test"}, nil
 		},
-		now: func() time.Time { return fixedNow },
 	}
 	return &testEnv{app: a, out: out, store: store, client: client, sess: sess}
 }
@@ -682,17 +690,29 @@ func TestDelete(t *testing.T) {
 	env.authenticate(t, "user-1")
 	_ = env.store.Save(&domain.Secret{ID: "id-1", Type: domain.SecretTypeText, Name: "Заметка"})
 
+	var serverDeleted string
+	env.client.deleteFn = func(_ context.Context, id string) error {
+		serverDeleted = id
+		return nil
+	}
+
 	if err := env.execute("delete", "id-1"); err != nil {
 		t.Fatalf("delete вернул ошибку: %v", err)
+	}
+	if serverDeleted != "id-1" {
+		t.Fatalf("HTTP DELETE не вызван для id-1, получено %q", serverDeleted)
 	}
 	if _, err := env.store.Get("id-1"); !errors.Is(err, domain.ErrSecretNotFound) {
 		t.Fatalf("секрет не удалён: %v", err)
 	}
 }
 
+// TestDeleteServerNotFound проверяет, что 404 на сервере не мешает локальному
+// удалению: запись уже отсутствует на сервере, но должна исчезнуть и локально.
 func TestDeleteServerNotFound(t *testing.T) {
 	env := newTestEnv(t, "")
 	env.authenticate(t, "user-1")
+	_ = env.store.Save(&domain.Secret{ID: "id-1", Type: domain.SecretTypeText, Name: "Заметка"})
 	env.client.deleteFn = func(context.Context, string) error {
 		return api.ErrNotFound
 	}
@@ -700,19 +720,66 @@ func TestDeleteServerNotFound(t *testing.T) {
 	if err := env.execute("delete", "id-1"); err != nil {
 		t.Fatalf("delete вернул ошибку: %v", err)
 	}
+	if _, err := env.store.Get("id-1"); !errors.Is(err, domain.ErrSecretNotFound) {
+		t.Fatalf("секрет не удалён локально: %v", err)
+	}
+}
+
+// TestDeleteServerErrorKeepsLocal проверяет защиту от resurrection: при ошибке
+// сервера локальная копия НЕ удаляется, иначе следующий pull вернул бы запись.
+func TestDeleteServerErrorKeepsLocal(t *testing.T) {
+	env := newTestEnv(t, "")
+	env.authenticate(t, "user-1")
+	_ = env.store.Save(&domain.Secret{ID: "id-1", Type: domain.SecretTypeText, Name: "Заметка"})
+	env.client.deleteFn = func(context.Context, string) error {
+		return api.ErrServer
+	}
+
+	if err := env.execute("delete", "id-1"); err == nil {
+		t.Fatal("ожидалась ошибка")
+	}
+	if _, err := env.store.Get("id-1"); err != nil {
+		t.Fatalf("локальная запись удалена несмотря на ошибку сервера: %v", err)
+	}
+}
+
+// TestSyncDoesNotResurrectDeleted проверяет, что после удаления (сервер отдаёт
+// tombstone) pull/sync не воскрешает запись локально.
+func TestSyncDoesNotResurrectDeleted(t *testing.T) {
+	env := newTestEnv(t, "")
+	env.authenticate(t, "user-1")
+	_ = env.store.Save(&domain.Secret{ID: "id-1", Type: domain.SecretTypeText, Name: "Заметка", Version: 1})
+	_ = env.store.SetLastSync(fixedNow.Add(-time.Hour))
+
+	// Сервер отдаёт запись уже удалённой.
+	tombstone := &domain.Secret{ID: "id-1", Type: domain.SecretTypeText, Name: "Заметка", Version: 2, DeletedAt: &fixedNow}
+	env.client.syncFn = func(context.Context, time.Time) (*api.SyncResult, error) {
+		return &api.SyncResult{Secrets: []*domain.Secret{tombstone}, Watermark: fixedNow}, nil
+	}
+
+	if err := env.execute("sync"); err != nil {
+		t.Fatalf("sync вернул ошибку: %v", err)
+	}
+	if _, err := env.store.Get("id-1"); !errors.Is(err, domain.ErrSecretNotFound) {
+		t.Fatalf("удалённая запись воскрешена: %v", err)
+	}
 }
 
 func TestSync(t *testing.T) {
 	remote := &domain.Secret{ID: "id-1", Type: domain.SecretTypeText, Name: "Серверная", Version: 2, UpdatedAt: fixedNow}
 	deleted := &domain.Secret{ID: "id-2", Type: domain.SecretTypeText, Name: "Удалённая", DeletedAt: &fixedNow}
 
+	// Watermark намеренно отличается от локального времени (fixedNow), чтобы
+	// проверить, что last_sync берётся из ответа сервера, а не из часов клиента.
+	serverWatermark := fixedNow.Add(42 * time.Minute)
+
 	env := newTestEnv(t, "")
 	env.authenticate(t, "user-1")
 	_ = env.store.Save(&domain.Secret{ID: "id-2", Type: domain.SecretTypeText, Name: "Локальная копия"})
 	_ = env.store.SetLastSync(fixedNow.Add(-time.Hour))
 
-	env.client.syncFn = func(context.Context, time.Time) ([]*domain.Secret, error) {
-		return []*domain.Secret{remote, deleted}, nil
+	env.client.syncFn = func(context.Context, time.Time) (*api.SyncResult, error) {
+		return &api.SyncResult{Secrets: []*domain.Secret{remote, deleted}, Watermark: serverWatermark}, nil
 	}
 
 	if err := env.execute("sync"); err != nil {
@@ -724,8 +791,43 @@ func TestSync(t *testing.T) {
 	if _, err := env.store.Get("id-2"); !errors.Is(err, domain.ErrSecretNotFound) {
 		t.Fatalf("удалённый секрет остался локально: %v", err)
 	}
-	if env.store.lastSync.IsZero() {
-		t.Fatal("last_sync не обновлён")
+	if !env.store.lastSync.Equal(serverWatermark) {
+		t.Fatalf("last_sync = %v, ожидался watermark сервера %v", env.store.lastSync, serverWatermark)
+	}
+}
+
+// TestSyncIsIdempotent проверяет идемпотентность применения серверных записей:
+// повторный приход той же версии не ломает состояние, а более старая серверная
+// версия не затирает более новую локальную.
+func TestSyncIsIdempotent(t *testing.T) {
+	env := newTestEnv(t, "")
+	env.authenticate(t, "user-1")
+
+	// Локально уже лежит более новая версия той же записи.
+	_ = env.store.Save(&domain.Secret{
+		ID: "id-1", Type: domain.SecretTypeText, Name: "Новая локальная", Version: 5, UpdatedAt: fixedNow,
+	})
+
+	// Сервер присылает более старую версию.
+	env.client.syncFn = func(context.Context, time.Time) (*api.SyncResult, error) {
+		return &api.SyncResult{
+			Secrets: []*domain.Secret{
+				{ID: "id-1", Type: domain.SecretTypeText, Name: "Старая серверная", Version: 3, UpdatedAt: fixedNow},
+			},
+			Watermark: fixedNow,
+		}, nil
+	}
+
+	if err := env.execute("sync"); err != nil {
+		t.Fatalf("sync вернул ошибку: %v", err)
+	}
+
+	got, err := env.store.Get("id-1")
+	if err != nil {
+		t.Fatalf("Get вернул ошибку: %v", err)
+	}
+	if got.Version != 5 || got.Name != "Новая локальная" {
+		t.Fatalf("старая серверная версия затерла локальную: %+v", got)
 	}
 }
 
@@ -1020,18 +1122,6 @@ func TestUpdateFromServer(t *testing.T) {
 	}
 	if _, err := env.store.Get("id-1"); err != nil {
 		t.Fatalf("секрет не сохранён: %v", err)
-	}
-}
-
-func TestDeleteServerError(t *testing.T) {
-	env := newTestEnv(t, "")
-	env.authenticate(t, "user-1")
-	env.client.deleteFn = func(context.Context, string) error {
-		return api.ErrServer
-	}
-
-	if err := env.execute("delete", "id-1"); err == nil {
-		t.Fatal("ожидалась ошибка")
 	}
 }
 

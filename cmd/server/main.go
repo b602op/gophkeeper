@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"log"
@@ -22,8 +23,40 @@ import (
 	"github.com/b602op/gophkeeper/internal/service"
 )
 
+// dbPool интерфейс пула соединений с БД, который нужен для запуска приложения.
+// Используем интерфейс вместо конкретной реализации Postgres: так в тестах
+// можно подставить заглушку и не поднимать реальную базу тесты быстрее и стабильнее.
+type dbPool interface {
+	DB() *sql.DB
+	Close() error
+}
+
+// serverDeps собирает зависимости для запуска сервера чтобы можно было подменять их в тестах.
+//
+// serve и shutdown привязаны к конкретному *http.Server, который создаётся внутри run.
+// Поэтому в продакшене их значения задаются там, а в тестах можно подменить так получится
+// протестировать Shutdown, который является методом конкретного типа и иначе не подменяется.
+type serverDeps struct {
+	loadConfig func([]string) (*config.Config, error)
+	notify     func(context.Context, ...os.Signal) (context.Context, context.CancelFunc)
+	openDB     func(context.Context, string) (dbPool, error)
+	serve      func(*http.Server) error
+	shutdown   func(context.Context) error
+}
+
+// defaultDeps собирает production-зависимости.
+func defaultDeps() serverDeps {
+	return serverDeps{
+		loadConfig: config.Load,
+		notify:     signal.NotifyContext,
+		openDB: func(ctx context.Context, dsn string) (dbPool, error) {
+			return repository.Open(ctx, dsn)
+		},
+	}
+}
+
 func main() {
-	if err := run(); err != nil {
+	if err := run(defaultDeps()); err != nil {
 		// main не завершает процесс через os.Exit: логика вынесена в run,
 		// здесь только аварийное завершение с понятным сообщением.
 		log.Fatalf("сервер остановлен с ошибкой: %v", err)
@@ -31,8 +64,8 @@ func main() {
 }
 
 // run собирает зависимости, запускает сервер и корректно освобождает ресурсы.
-func run() error {
-	cfg, err := config.Load(os.Args[1:])
+func run(deps serverDeps) error {
+	cfg, err := deps.loadConfig(os.Args[1:])
 	if err != nil {
 		return fmt.Errorf("загрузка конфигурации: %w", err)
 	}
@@ -42,10 +75,10 @@ func run() error {
 
 	// NotifyContext отменяет контекст по SIGINT/SIGTERM/SIGQUIT, что запускает
 	// единый сценарий graceful shutdown.
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
+	ctx, stop := deps.notify(context.Background(), syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
 	defer stop()
 
-	pool, err := repository.Open(ctx, cfg.DatabaseDSN)
+	pool, err := deps.openDB(ctx, cfg.DatabaseDSN)
 	if err != nil {
 		return fmt.Errorf("подключение к базе данных: %w", err)
 	}
@@ -83,16 +116,24 @@ func run() error {
 		IdleTimeout:  cfg.IdleTimeout,
 	}
 
+	serve := deps.serve
+	if serve == nil {
+		serve = func(s *http.Server) error {
+			if cfg.EnableHTTPS {
+				return s.ListenAndServeTLS(cfg.TLSCertFile, cfg.TLSKeyFile)
+			}
+			return s.ListenAndServe()
+		}
+	}
+	shutdown := deps.shutdown
+	if shutdown == nil {
+		shutdown = server.Shutdown
+	}
+
 	serverErr := make(chan error, 1)
 	go func() {
 		log.Info("HTTP-сервер слушает", slog.String("address", cfg.RunAddress), slog.Bool("https", cfg.EnableHTTPS))
-		var listenErr error
-		if cfg.EnableHTTPS {
-			listenErr = server.ListenAndServeTLS(cfg.TLSCertFile, cfg.TLSKeyFile)
-		} else {
-			listenErr = server.ListenAndServe()
-		}
-		if listenErr != nil && !errors.Is(listenErr, http.ErrServerClosed) {
+		if listenErr := serve(server); listenErr != nil && !errors.Is(listenErr, http.ErrServerClosed) {
 			serverErr <- listenErr
 		}
 	}()
@@ -106,7 +147,7 @@ func run() error {
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
 	defer cancel()
-	if err := server.Shutdown(shutdownCtx); err != nil {
+	if err := shutdown(shutdownCtx); err != nil {
 		return fmt.Errorf("корректная остановка HTTP-сервера: %w", err)
 	}
 	log.Info("сервер остановлен")

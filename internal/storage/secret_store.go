@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"iter"
 	"strings"
 	"time"
 
@@ -34,6 +35,57 @@ func (s *SecretStore) Save(secret *domain.Secret) error {
 		if b == nil {
 			return ErrBucketMissing
 		}
+		if err := b.Put([]byte(secret.ID), data); err != nil {
+			return fmt.Errorf("сохранение секрета %q: %w", secret.ID, err)
+		}
+		return nil
+	})
+}
+
+// SaveFromServer применяет серверную запись идемпотентно.
+//
+// В отличие от Save, который безусловно перезаписывает запись по id, этот метод
+// сверяет версии:
+//
+//   - локальной записи нет — сохранить;
+//   - локальная версия меньше серверной — перезаписать;
+//   - локальная версия не меньше серверной — пропустить.
+//
+// Это делает применение изменений при синхронизации идемпотентным: повторный
+// приход той же записи (например, если клиент завершился между применением
+// данных и сохранением last_sync) не ломает состояние, а более старая серверная
+// версия не затирает более новую локальную.
+func (s *SecretStore) SaveFromServer(secret *domain.Secret) error {
+	if secret == nil {
+		return errors.New("секрет не задан")
+	}
+	if strings.TrimSpace(secret.ID) == "" {
+		return errors.New("идентификатор секрета пуст")
+	}
+
+	data, err := json.Marshal(secret)
+	if err != nil {
+		return fmt.Errorf("сериализация секрета %q: %w", secret.ID, err)
+	}
+
+	return s.update(func(tx *bolt.Tx) error {
+		b := tx.Bucket(bucketSecrets)
+		if b == nil {
+			return ErrBucketMissing
+		}
+
+		// Сверка версий и запись выполняются в одной транзакции: между чтением
+		// локальной версии и записью не может вклиниться другое обновление.
+		if raw := b.Get([]byte(secret.ID)); raw != nil {
+			var local domain.Secret
+			if err := json.Unmarshal(raw, &local); err != nil {
+				return fmt.Errorf("разбор секрета %q: %w", secret.ID, err)
+			}
+			if local.Version >= secret.Version {
+				return nil
+			}
+		}
+
 		if err := b.Put([]byte(secret.ID), data); err != nil {
 			return fmt.Errorf("сохранение секрета %q: %w", secret.ID, err)
 		}
@@ -101,24 +153,67 @@ func (s *SecretStore) List() ([]*domain.Secret, error) {
 //
 // Поиск регистронезависимый. Пустой запрос возвращает все записи.
 func (s *SecretStore) Search(query string) ([]*domain.Secret, error) {
-	needle := strings.ToLower(strings.TrimSpace(query))
-	if needle == "" {
-		return s.List()
-	}
-
-	all, err := s.List()
-	if err != nil {
-		return nil, err
-	}
+	seq, iterErr := s.searchIter(query)
 
 	matches := make([]*domain.Secret, 0)
-	for _, secret := range all {
-		if strings.Contains(strings.ToLower(secret.Name), needle) ||
-			strings.Contains(strings.ToLower(secret.Metadata), needle) {
-			matches = append(matches, secret)
-		}
+	for secret := range seq {
+		matches = append(matches, secret)
+	}
+	// Ошибка обхода (повреждённая запись, закрытая база) не прерывает iter.Seq
+	// значением, поэтому проверяется после обхода.
+	if *iterErr != nil {
+		return nil, *iterErr
 	}
 	return matches, nil
+}
+
+// errStopIteration — внутренний сигнал досрочной остановки обхода. Он не должен
+// покидать searchIter: ForEach завершается ошибкой, а searchIter её отфильтровывает.
+var errStopIteration = errors.New("обход прерван")
+
+// searchIter возвращает ленивую последовательность секретов, подходящих под
+// запрос, и указатель на ошибку обхода.
+//
+// Ленивость позволяет не собирать весь бакет в промежуточный срез: записи
+// читаются, разбираются и фильтруются по одной, что снижает пиковую память на
+// больших базах. Обход выполняется в одной транзакции чтения под мьютексом
+// хранилища, поэтому вызывать другие методы SecretStore во время обхода нельзя —
+// это приведёт к взаимной блокировке.
+//
+// iter.Seq не умеет возвращать значение, поэтому ошибки (некорректный JSON,
+// закрытая база) и сигнал остановки фиксируются в iterErr; вызывающая сторона
+// обязана проверить его после обхода.
+func (s *SecretStore) searchIter(query string) (iter.Seq[*domain.Secret], *error) {
+	needle := strings.ToLower(strings.TrimSpace(query))
+
+	var iterErr error
+	seq := func(yield func(*domain.Secret) bool) {
+		err := s.view(func(tx *bolt.Tx) error {
+			b := tx.Bucket(bucketSecrets)
+			if b == nil {
+				return ErrBucketMissing
+			}
+			return b.ForEach(func(key, value []byte) error {
+				var secret domain.Secret
+				if err := json.Unmarshal(value, &secret); err != nil {
+					return fmt.Errorf("разбор секрета %q: %w", string(key), err)
+				}
+				if needle != "" &&
+					!strings.Contains(strings.ToLower(secret.Name), needle) &&
+					!strings.Contains(strings.ToLower(secret.Metadata), needle) {
+					return nil
+				}
+				if !yield(&secret) {
+					return errStopIteration
+				}
+				return nil
+			})
+		})
+		if err != nil && !errors.Is(err, errStopIteration) {
+			iterErr = err
+		}
+	}
+	return seq, &iterErr
 }
 
 // Delete удаляет секрет по идентификатору.

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -266,6 +267,13 @@ func TestHandleDeleteSecret(t *testing.T) {
 }
 
 func TestHandleSync(t *testing.T) {
+	// Серверное время watermark детерминировано в тестах.
+	watermark := time.Date(2026, 2, 1, 8, 0, 0, 0, time.UTC)
+	withNow := func(h *Handler) *Handler {
+		h.now = func() time.Time { return watermark }
+		return h
+	}
+
 	t.Run("без since использует список", func(t *testing.T) {
 		secrets := &stubSecrets{
 			listFn: func(context.Context, string) ([]*domain.Secret, error) {
@@ -276,9 +284,10 @@ func TestHandleSync(t *testing.T) {
 				return nil, nil
 			},
 		}
-		h := newSecretHandler(secrets)
+		h := withNow(newSecretHandler(secrets))
 		rec := doRequest(t, h.Routes(), http.MethodGet, "/api/v1/sync", "")
 		require.Equal(t, http.StatusOK, rec.Code)
+		require.Equal(t, watermark, decodeWatermark(t, rec))
 	})
 
 	t.Run("с since", func(t *testing.T) {
@@ -288,27 +297,47 @@ func TestHandleSync(t *testing.T) {
 			gotSince = since
 			return []*domain.Secret{testSecret()}, nil
 		}}
-		h := newSecretHandler(secrets)
+		h := withNow(newSecretHandler(secrets))
 		rec := doRequest(t, h.Routes(), http.MethodGet, "/api/v1/sync?since=2026-01-15T10:30:00Z", "")
 
 		require.Equal(t, http.StatusOK, rec.Code)
 		require.Equal(t, time.Date(2026, 1, 15, 10, 30, 0, 0, time.UTC), gotSince)
+		require.Equal(t, watermark, decodeWatermark(t, rec))
 	})
 
 	t.Run("некорректный since", func(t *testing.T) {
-		h := newSecretHandler(&stubSecrets{})
+		h := withNow(newSecretHandler(&stubSecrets{}))
 		rec := doRequest(t, h.Routes(), http.MethodGet, "/api/v1/sync?since=15-01-2026", "")
 		require.Equal(t, http.StatusBadRequest, rec.Code)
+	})
+
+	t.Run("ошибка списка без since", func(t *testing.T) {
+		secrets := &stubSecrets{listFn: func(context.Context, string) ([]*domain.Secret, error) {
+			return nil, errors.New("сбой")
+		}}
+		h := withNow(newSecretHandler(secrets))
+		rec := doRequest(t, h.Routes(), http.MethodGet, "/api/v1/sync", "")
+		require.Equal(t, http.StatusInternalServerError, rec.Code)
 	})
 
 	t.Run("ошибка синхронизации", func(t *testing.T) {
 		secrets := &stubSecrets{syncFn: func(context.Context, string, time.Time) ([]*domain.Secret, error) {
 			return nil, errors.New("сбой")
 		}}
-		h := newSecretHandler(secrets)
+		h := withNow(newSecretHandler(secrets))
 		rec := doRequest(t, h.Routes(), http.MethodGet, "/api/v1/sync?since=2026-01-15T10:30:00Z", "")
 		require.Equal(t, http.StatusInternalServerError, rec.Code)
 	})
+}
+
+// decodeWatermark разбирает sync_watermark из тела ответа синхронизации.
+func decodeWatermark(t *testing.T, rec *httptest.ResponseRecorder) time.Time {
+	t.Helper()
+	var resp struct {
+		SyncWatermark time.Time `json:"sync_watermark"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	return resp.SyncWatermark
 }
 
 func TestParseSinceParam(t *testing.T) {

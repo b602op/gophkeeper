@@ -27,6 +27,14 @@ import (
 // ErrInvalidConfig сигнализирует о некорректной конфигурации.
 var ErrInvalidConfig = errors.New("некорректная конфигурация")
 
+// ConfigOption — один шаг сборки конфигурации.
+//
+// Опции применяются строго в порядке приоритета источников (от слабого к
+// сильному): дефолты → файл → окружение → флаги. Каждый следующий шаг
+// перекрывает значения предыдущего. Ошибка любого шага прерывает загрузку
+// (fail fast): сервис не должен стартовать в заведомо нерабочем состоянии.
+type ConfigOption func(*Config) error
+
 // Значения по умолчанию.
 const (
 	defaultRunAddress      = "localhost:8080"
@@ -154,6 +162,9 @@ func Load(args []string) (*Config, error) {
 
 // load — тестируемая реализация Load с внедряемым доступом к переменным
 // окружения. Функция getenv позволяет изолировать тесты от глобального state.
+//
+// Порядок опций жёстко задан и отражает приоритет источников: каждый следующий
+// шаг перекрывает значения предыдущего. Ошибка любого шага прерывает загрузку.
 func load(args []string, getenv func(string) string) (*Config, error) {
 	fs := flag.NewFlagSet("gophkeeper", flag.ContinueOnError)
 	f, err := parseFlags(fs, args)
@@ -161,23 +172,24 @@ func load(args []string, getenv func(string) string) (*Config, error) {
 		return nil, err
 	}
 
-	cfg := defaults()
-
+	// Путь к файлу конфигурации берётся из флага или окружения; флаг сильнее.
 	configPath := getenv(envConfigFile)
 	if f.set[flagConfigFile] {
 		configPath = f.configFile
 	}
-	if configPath != "" {
-		if err := applyFile(cfg, configPath); err != nil {
+
+	cfg := &Config{}
+	options := []ConfigOption{
+		applyDefaults,
+		applyFile(configPath),
+		applyEnv(getenv),
+		applyFlags(f),
+	}
+	for _, apply := range options {
+		if err := apply(cfg); err != nil {
 			return nil, err
 		}
 	}
-
-	if err := applyEnv(cfg, getenv); err != nil {
-		return nil, err
-	}
-
-	applyFlags(cfg, f)
 
 	if err := cfg.validate(); err != nil {
 		return nil, err
@@ -229,8 +241,27 @@ func defaults() *Config {
 	}
 }
 
+// applyDefaults заполняет конфигурацию значениями по умолчанию.
+func applyDefaults(cfg *Config) error {
+	*cfg = *defaults()
+	return nil
+}
+
 // applyFile накладывает значения из JSON-файла на конфигурацию.
-func applyFile(cfg *Config, path string) error {
+//
+// Пустой путь означает, что файл не задан, и шаг пропускается: конфигурация
+// остаётся на значениях предыдущих шагов.
+func applyFile(path string) ConfigOption {
+	return func(cfg *Config) error {
+		if path == "" {
+			return nil
+		}
+		return loadFile(cfg, path)
+	}
+}
+
+// loadFile читает JSON-файл конфигурации и накладывает его значения.
+func loadFile(cfg *Config, path string) error {
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return fmt.Errorf("%w: чтение файла конфигурации %q: %v", ErrInvalidConfig, path, err)
@@ -280,7 +311,14 @@ func applyFile(cfg *Config, path string) error {
 }
 
 // applyEnv накладывает значения переменных окружения на конфигурацию.
-func applyEnv(cfg *Config, getenv func(string) string) error {
+func applyEnv(getenv func(string) string) ConfigOption {
+	return func(cfg *Config) error {
+		return loadEnv(cfg, getenv)
+	}
+}
+
+// loadEnv читает переменные окружения и накладывает их значения.
+func loadEnv(cfg *Config, getenv func(string) string) error {
 	setEnvString(&cfg.RunAddress, getenv, envRunAddress)
 	setEnvString(&cfg.DatabaseDSN, getenv, envDatabaseDSN)
 	setEnvString(&cfg.JWTSecret, getenv, envJWTSecret)
@@ -314,7 +352,18 @@ func applyEnv(cfg *Config, getenv func(string) string) error {
 }
 
 // applyFlags накладывает явно заданные флаги на конфигурацию.
-func applyFlags(cfg *Config, f *flags) {
+//
+// Флаги уже разобраны (parseFlags) до построения опций: результат нужен и для
+// определения пути к файлу конфигурации, поэтому повторный разбор не делается.
+func applyFlags(f *flags) ConfigOption {
+	return func(cfg *Config) error {
+		mergeFlags(cfg, f)
+		return nil
+	}
+}
+
+// mergeFlags переносит в конфигурацию только явно заданные флаги.
+func mergeFlags(cfg *Config, f *flags) {
 	if f.set[flagRunAddress] {
 		cfg.RunAddress = f.runAddress
 	}

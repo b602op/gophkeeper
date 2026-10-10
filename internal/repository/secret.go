@@ -28,10 +28,16 @@ const (
 		ORDER BY updated_at ASC`
 	querySelectSecretVersion = `SELECT version FROM secrets
 		WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL`
+	// queryUpdateSecret сверяет version в WHERE: это авторитетная проверка
+	// оптимистичной блокировки. Она не зависит от уровня изоляции транзакции,
+	// в отличие от предварительного SELECT, и защищает от потери параллельной
+	// правки, когда два клиента прочитали одну версию и оба дошли до UPDATE.
+	// deleted_at IS NULL уже гарантирует, что удалённая запись не обновится,
+	// поэтому RETURNING не включает deleted_at.
 	queryUpdateSecret = `UPDATE secrets
 		SET type = $1, name = $2, metadata = $3, data = $4,
 		    version = version + 1, updated_at = NOW()
-		WHERE id = $5 AND user_id = $6 AND deleted_at IS NULL
+		WHERE id = $5 AND user_id = $6 AND version = $7 AND deleted_at IS NULL
 		RETURNING id, user_id, type, name, metadata, data, version, created_at, updated_at`
 	querySoftDeleteSecret = `UPDATE secrets
 		SET deleted_at = NOW(), updated_at = NOW(), version = version + 1
@@ -108,9 +114,17 @@ func (r *SecretRepository) FindByUserSince(ctx context.Context, userID string, s
 // domain.ErrSecretNotFound. Условие по user_id защищает от изменения чужого
 // секрета даже при ошибочной проверке на уровне сервиса.
 //
-// После успешного обновления в переданный secret записываются все поля из
-// базы, включая created_at, version и updated_at: клиент должен получить
-// актуальное состояние записи, иначе локальная копия разойдётся с сервером.
+// Версия сверяется дважды. Предварительный SELECT даёт fast-path с точным
+// сообщением (ожидаемая и текущая версии) для логов, а условие version = $7 в
+// самом UPDATE — авторитетная защита: если запись изменена параллельно между
+// SELECT и UPDATE, UPDATE не затронет ни одной строки, RETURNING не вернёт
+// строк, Scan получит sql.ErrNoRows, и метод вернёт ErrSecretVersionMismatch.
+// Это работает независимо от уровня изоляции транзакции.
+//
+// После успешного обновления переданный secret мутируется на месте: в него
+// записываются все поля из базы, включая created_at, version и updated_at.
+// Клиент должен получить актуальное состояние записи, иначе локальная копия
+// разойдётся с сервером.
 func (r *SecretRepository) Update(ctx context.Context, secret *domain.Secret) error {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -128,30 +142,45 @@ func (r *SecretRepository) Update(ctx context.Context, secret *domain.Secret) er
 		}
 		return fmt.Errorf("чтение версии секрета %q: %w", secret.ID, err)
 	}
+	// Fast-path: расходимся до UPDATE, если версия уже не та. Это не заменяет
+	// проверку в WHERE, но даёт более точное сообщение в логах.
 	if currentVersion != secret.Version {
 		return fmt.Errorf("обновление секрета %q: ожидалась версия %d, текущая %d: %w",
 			secret.ID, secret.Version, currentVersion, domain.ErrSecretVersionMismatch)
 	}
 
 	row := tx.QueryRowContext(ctx, queryUpdateSecret,
-		secret.Type, secret.Name, secret.Metadata, secret.Data, secret.ID, secret.UserID)
+		secret.Type, secret.Name, secret.Metadata, secret.Data,
+		secret.ID, secret.UserID, secret.Version)
+
+	var updated domain.Secret
 	if err := row.Scan(
-		&secret.ID,
-		&secret.UserID,
-		&secret.Type,
-		&secret.Name,
-		&secret.Metadata,
-		&secret.Data,
-		&secret.Version,
-		&secret.CreatedAt,
-		&secret.UpdatedAt,
+		&updated.ID,
+		&updated.UserID,
+		&updated.Type,
+		&updated.Name,
+		&updated.Metadata,
+		&updated.Data,
+		&updated.Version,
+		&updated.CreatedAt,
+		&updated.UpdatedAt,
 	); err != nil {
+		// UPDATE ... RETURNING не возвращает строк тогда и только тогда, когда
+		// не обновлено ни одной строки. Предварительный SELECT уже исключил
+		// «не найдено», «удалено» и «чужой», поэтому единственная причина —
+		// параллельное изменение версии другим клиентом.
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("обновление секрета %q: запись изменена параллельно: %w",
+				secret.ID, domain.ErrSecretVersionMismatch)
+		}
 		return fmt.Errorf("обновление секрета %q: %w", secret.ID, err)
 	}
 
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("фиксация обновления секрета %q: %w", secret.ID, err)
 	}
+
+	*secret = updated
 	return nil
 }
 

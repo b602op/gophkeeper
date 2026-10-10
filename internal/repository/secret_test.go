@@ -252,7 +252,7 @@ func TestSecretRepositoryUpdate(t *testing.T) {
 			WithArgs(s.ID, s.UserID).
 			WillReturnRows(sqlmock.NewRows([]string{"version"}).AddRow(int64(1)))
 		mock.ExpectQuery(regexp.QuoteMeta(queryUpdateSecret)).
-			WithArgs(s.Type, s.Name, s.Metadata, s.Data, s.ID, s.UserID).
+			WithArgs(s.Type, s.Name, s.Metadata, s.Data, s.ID, s.UserID, s.Version).
 			WillReturnRows(updatedSecretRow(s, 2, updatedAt))
 		mock.ExpectCommit()
 
@@ -273,6 +273,29 @@ func TestSecretRepositoryUpdate(t *testing.T) {
 
 		err := repo.Update(context.Background(), s)
 		require.ErrorIs(t, err, domain.ErrSecretVersionMismatch)
+	})
+
+	t.Run("изменено параллельно", func(t *testing.T) {
+		repo, mock := newSecretRepo(t)
+		s := testSecret()
+		mock.ExpectBegin()
+		// Fast-path проходит: прочитанная версия совпадает с версией секрета.
+		mock.ExpectQuery(regexp.QuoteMeta(querySelectSecretVersion)).
+			WithArgs(s.ID, s.UserID).
+			WillReturnRows(sqlmock.NewRows([]string{"version"}).AddRow(s.Version))
+		// Но UPDATE не затрагивает строк: версия изменилась между SELECT и UPDATE.
+		mock.ExpectQuery(regexp.QuoteMeta(queryUpdateSecret)).
+			WithArgs(s.Type, s.Name, s.Metadata, s.Data, s.ID, s.UserID, s.Version).
+			WillReturnRows(sqlmock.NewRows([]string{
+				"id", "user_id", "type", "name", "metadata", "data", "version", "created_at", "updated_at",
+			}))
+		mock.ExpectRollback()
+
+		err := repo.Update(context.Background(), s)
+		require.ErrorIs(t, err, domain.ErrSecretVersionMismatch)
+		// Версия не должна «уехать» вперёд при неуспешном обновлении.
+		require.Equal(t, int64(1), s.Version)
+		require.NoError(t, mock.ExpectationsWereMet())
 	})
 
 	t.Run("секрет не найден", func(t *testing.T) {
@@ -307,7 +330,7 @@ func TestSecretRepositoryUpdate(t *testing.T) {
 			WithArgs(s.ID, s.UserID).
 			WillReturnRows(sqlmock.NewRows([]string{"version"}).AddRow(int64(1)))
 		mock.ExpectQuery(regexp.QuoteMeta(queryUpdateSecret)).
-			WithArgs(s.Type, s.Name, s.Metadata, s.Data, s.ID, s.UserID).
+			WithArgs(s.Type, s.Name, s.Metadata, s.Data, s.ID, s.UserID, s.Version).
 			WillReturnError(dbErr)
 		mock.ExpectRollback()
 
@@ -324,7 +347,7 @@ func TestSecretRepositoryUpdate(t *testing.T) {
 			WithArgs(s.ID, s.UserID).
 			WillReturnRows(sqlmock.NewRows([]string{"version"}).AddRow(int64(1)))
 		mock.ExpectQuery(regexp.QuoteMeta(queryUpdateSecret)).
-			WithArgs(s.Type, s.Name, s.Metadata, s.Data, s.ID, s.UserID).
+			WithArgs(s.Type, s.Name, s.Metadata, s.Data, s.ID, s.UserID, s.Version).
 			WillReturnRows(updatedSecretRow(s, 2, time.Now()))
 		mock.ExpectCommit().WillReturnError(dbErr)
 

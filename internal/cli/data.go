@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 
@@ -243,9 +244,20 @@ func (a *app) buildBinary(d *secretData) ([]byte, error) {
 		return nil, errors.New("путь к файлу не задан")
 	}
 
-	data, err := os.ReadFile(path)
+	cwd, err := os.Getwd()
 	if err != nil {
-		return nil, fmt.Errorf("чтение файла %q: %w", path, err)
+		return nil, fmt.Errorf("не удалось получить текущую директорию: %w", err)
+	}
+
+	f, err := openRestrictedFile(cwd, path)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+
+	data, err := io.ReadAll(f)
+	if err != nil {
+		return nil, fmt.Errorf("не удалось прочитать файл %q: %w", path, err)
 	}
 	if len(data) == 0 {
 		return nil, errors.New("файл пуст")

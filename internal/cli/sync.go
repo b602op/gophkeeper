@@ -45,11 +45,12 @@ func (a *app) runSync(ctx context.Context) error {
 		return err
 	}
 
-	remote, err := client.Sync(ctx, lastSync)
+	result, err := client.Sync(ctx, lastSync)
 	if err != nil {
 		return err
 	}
 
+	remote := result.Secrets
 	remoteIDs := make(map[string]bool, len(remote))
 	for _, secret := range remote {
 		remoteIDs[secret.ID] = true
@@ -60,7 +61,9 @@ func (a *app) runSync(ctx context.Context) error {
 			}
 			continue
 		}
-		if err := store.Save(secret); err != nil {
+		// SaveFromServer идемпотентен: повторно пришедшая запись не ломает
+		// состояние, а более старая серверная версия не затирает новую локальную.
+		if err := store.SaveFromServer(secret); err != nil {
 			return err
 		}
 	}
@@ -71,8 +74,12 @@ func (a *app) runSync(ctx context.Context) error {
 		}
 	}
 
-	if err := store.SetLastSync(a.now().UTC()); err != nil {
-		return err
+	// Watermark берётся из ответа сервера, а не из локальных часов: отставание
+	// или спешка клиентского времени не приводят к дублям или потере изменений.
+	if !result.Watermark.IsZero() {
+		if err := store.SetLastSync(result.Watermark); err != nil {
+			return err
+		}
 	}
 
 	a.print("Синхронизация завершена: получено записей — %d.\n", len(remote))

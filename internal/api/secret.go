@@ -32,6 +32,19 @@ type listResponse struct {
 	Secrets []*domain.Secret `json:"secrets"`
 }
 
+// syncResponse — ответ GET /api/v1/sync.
+type syncResponse struct {
+	Secrets       []*domain.Secret `json:"secrets"`
+	SyncWatermark time.Time        `json:"sync_watermark"`
+}
+
+// SyncResult — результат синхронизации: полученные записи и серверный
+// watermark, который клиент сохраняет как last_sync для следующего запроса.
+type SyncResult struct {
+	Secrets   []*domain.Secret
+	Watermark time.Time
+}
+
 // Register создаёт пользователя на сервере.
 //
 // Сервер не выдаёт токен при регистрации, поэтому после успешного вызова
@@ -114,19 +127,22 @@ func (c *Client) DeleteSecret(ctx context.Context, id string) error {
 	return nil
 }
 
-// Sync возвращает секреты, изменённые после указанного момента.
+// Sync возвращает секреты, изменённые после указанного момента, и серверный
+// watermark.
 //
-// Нулевое время означает запрос всех неудалённых секретов.
-func (c *Client) Sync(ctx context.Context, since time.Time) ([]*domain.Secret, error) {
+// Нулевое время означает запрос всех неудалённых секретов. Watermark берётся
+// из ответа сервера: он не зависит от часов клиента, поэтому отставание или
+// спешка локального времени не приводят к дублям или потере изменений.
+func (c *Client) Sync(ctx context.Context, since time.Time) (*SyncResult, error) {
 	path := "/api/v1/sync"
 	if !since.IsZero() {
 		query := url.Values{"since": []string{since.UTC().Format(time.RFC3339)}}
 		path += "?" + query.Encode()
 	}
 
-	var resp listResponse
+	var resp syncResponse
 	if err := c.do(ctx, http.MethodGet, path, nil, &resp); err != nil {
 		return nil, fmt.Errorf("синхронизация: %w", err)
 	}
-	return resp.Secrets, nil
+	return &SyncResult{Secrets: resp.Secrets, Watermark: resp.SyncWatermark}, nil
 }

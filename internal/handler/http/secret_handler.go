@@ -14,6 +14,18 @@ type listResponse struct {
 	Secrets []*domain.Secret `json:"secrets"`
 }
 
+// syncResponse — ответ GET /api/v1/sync.
+//
+// Отдельная структура от listResponse, потому что watermark нужен только
+// синхронизации: в списке секретов (GET /api/v1/secrets) это поле было бы
+// бессмысленным.
+type syncResponse struct {
+	Secrets []*domain.Secret `json:"secrets"`
+	// SyncWatermark — момент времени на сервере, до которого данные считаются
+	// полученными. Клиент сохраняет его как last_sync для следующего запроса.
+	SyncWatermark time.Time `json:"sync_watermark"`
+}
+
 // handleCreateSecret обрабатывает POST /api/v1/secrets.
 func (h *Handler) handleCreateSecret(w http.ResponseWriter, r *http.Request) {
 	userID, ok := middleware.UserIDFromContext(r.Context())
@@ -110,12 +122,21 @@ func (h *Handler) handleDeleteSecret(w http.ResponseWriter, r *http.Request) {
 // Параметр since задаётся в формате RFC3339. Без параметра возвращаются все
 // неудалённые секреты; с параметром — все изменения после указанного момента,
 // включая удалённые записи.
+//
+// В ответе всегда возвращается sync_watermark — серверное «сейчас». Клиент
+// сохраняет его как last_sync для следующего запроса. В качестве watermark
+// берётся время сервера, а не max(updated_at) отданных записей: updated_at
+// пишется через NOW() (время транзакции) и может совпадать у разных записей,
+// поэтому строгое сравнение updated_at > since по max(updated_at) могло бы
+// потерять запись с тем же timestamp, созданную позже.
 func (h *Handler) handleSync(w http.ResponseWriter, r *http.Request) {
 	userID, ok := middleware.UserIDFromContext(r.Context())
 	if !ok {
 		writeError(h.log, w, http.StatusUnauthorized, "требуется авторизация")
 		return
 	}
+
+	watermark := h.now().UTC()
 
 	raw := r.URL.Query().Get("since")
 	if raw == "" {
@@ -124,7 +145,7 @@ func (h *Handler) handleSync(w http.ResponseWriter, r *http.Request) {
 			h.respondServiceError(w, "синхронизация секретов", err)
 			return
 		}
-		writeJSON(h.log, w, http.StatusOK, listResponse{Secrets: secrets})
+		writeJSON(h.log, w, http.StatusOK, syncResponse{Secrets: secrets, SyncWatermark: watermark})
 		return
 	}
 
@@ -139,7 +160,7 @@ func (h *Handler) handleSync(w http.ResponseWriter, r *http.Request) {
 		h.respondServiceError(w, "синхронизация секретов", err)
 		return
 	}
-	writeJSON(h.log, w, http.StatusOK, listResponse{Secrets: secrets})
+	writeJSON(h.log, w, http.StatusOK, syncResponse{Secrets: secrets, SyncWatermark: watermark})
 }
 
 // ParseSinceParam разбирает параметр since синхронизации.

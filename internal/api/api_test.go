@@ -163,18 +163,26 @@ func TestSecretNilArguments(t *testing.T) {
 
 func TestSync(t *testing.T) {
 	var gotQuery url.Values
+	watermark := time.Date(2026, 1, 15, 11, 0, 0, 0, time.UTC)
 
 	client := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/v1/sync" {
 			t.Errorf("неожиданный путь: %s", r.URL.Path)
 		}
 		gotQuery = r.URL.Query()
-		writeJSON(t, w, http.StatusOK, listResponse{Secrets: []*domain.Secret{}})
+		writeJSON(t, w, http.StatusOK, syncResponse{
+			Secrets:       []*domain.Secret{},
+			SyncWatermark: watermark,
+		})
 	})
 	ctx := context.Background()
 
-	if _, err := client.Sync(ctx, time.Time{}); err != nil {
+	result, err := client.Sync(ctx, time.Time{})
+	if err != nil {
 		t.Fatalf("Sync без since вернул ошибку: %v", err)
+	}
+	if !result.Watermark.Equal(watermark) {
+		t.Fatalf("watermark = %v, ожидался %v", result.Watermark, watermark)
 	}
 	if gotQuery.Has("since") {
 		t.Fatalf("при нулевом времени параметр since не должен передаваться: %v", gotQuery)
